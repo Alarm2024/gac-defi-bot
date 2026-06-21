@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: guardian-bot
+Version: 0.1.0
+Requires-Dist: python-telegram-bot>=20.0
+Requires-Dist: pydantic-settings
+Requires-Dist: structlog
+Requires-Dist: python-dotenv

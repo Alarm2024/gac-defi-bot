@@ -1,0 +1,20 @@
+{
+    "total_mitigated": 829.8,
+    "realized_profit": 0,
+    "certificates": [
+        {
+            "cert_id": "VCU-1782060012-5407",
+            "location": "Zone-B",
+            "mitigation_tonnes": 350.98,
+            "audit": null,
+            "timestamp": "2026-06-21T16:40:12.649625"
+        },
+        {
+            "cert_id": "VCU-1782060047-8353",
+            "location": "Zone-C",
+            "mitigation_tonnes": 478.82,
+            "audit": null,
+            "timestamp": "2026-06-21T16:40:47.832152"
+        }
+    ]
+}
