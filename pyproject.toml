@@ -1,0 +1,9 @@
+[project]
+name = "guardian-bot"
+version = "0.1.0"
+dependencies = [
+    "python-telegram-bot>=20.0",
+    "pydantic-settings",
+    "structlog",
+    "python-dotenv"
+]

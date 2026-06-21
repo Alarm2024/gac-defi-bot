@@ -1,0 +1,4 @@
+#!/bin/bash
+# Replace with your actual credentials locally, DO NOT commit this file
+export TELEGRAM_BOT_TOKEN="YOUR_NEW_TOKEN_HERE"
+export CHAT_ID="YOUR_CHAT_ID"
