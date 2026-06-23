@@ -1,7 +1,5 @@
-.env
 node_modules/
-venv/
-__pycache__/
-*.log
-.cache/
-.local/
+dist/
+.env
+.env.*
+!.env.example
