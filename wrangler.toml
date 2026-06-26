@@ -1,20 +1,32 @@
-name = "garden-angel"
-main = "worker.js"
-compatibility_date = "2024-09-23"
+name = "garden-angel-production"
+main = "src/index.js"
+compatibility_date = "2026-06-25"
 compatibility_flags = ["nodejs_compat"]
 
 [triggers]
 crons = ["*/5 * * * *"]
 
 [vars]
-WALLET_ADDRESS = "0x08312f8381f059f5a8a13236cf10b54c08f9c991"
-TELEGRAM_BOT_TOKEN = "8744261892:AAH_HNd-nP483e7R60KDgf0fKdM_NUJ-FPE"
-PRIVATE_KEY = "0x752c3e91902755c2b82c8d914bba71f48cb99195340d10adcae82914ea0bd1c2"
-ENV = "development"
-DRY_RUN = "true"
+# Primary RPCs (Alchemy)
+ETH_RPC_PRIMARY = "https://eth-mainnet.g.alchemy.com/v2/jDO5OeBhqDf_KuifKkNE8"
+BSC_RPC_PRIMARY = "https://bnb-mainnet.g.alchemy.com/v2/jDO5OeBhqDf_KuifKkNE8"
+UNICHAIN_RPC_PRIMARY = "https://unichain-mainnet.g.alchemy.com/v2/jDO5OeBhqDf_KuifKkNE8"
+
+# Secondary RPCs (Infura)
+ETH_RPC_SECONDARY = "https://mainnet.infura.io/v3/1d1ff4c14cd6424bbce71cf3b5b044d8"
+BSC_RPC_SECONDARY = "https://bsc-mainnet.infura.io/v3/1d1ff4c14cd6424bbce71cf3b5b044d8"
+UNICHAIN_RPC_SECONDARY = "https://unichain-mainnet.infura.io/v3/1d1ff4c14cd6424bbce71cf3b5b044d8"
+
+# Etherscan API
+ETHERSCAN_API_KEY = "ASYD9FC1QIX4KECTEYN2B1HRU2TRHVRJA9"
+
+GAS_API_URL = "https://gas.api.infura.io/v3/1d1ff4c14cd6424bbce71cf3b5b044d8"
+MIN_NET_PROFIT_USD = "10.00"
+LOAN_FEET_PCT = "0.09"
+SLIPPAGE_PCT = "0.5"
 GAS_LIMIT_GWEI = "80"
-RPC_URL = "https://mainnet.infura.io/v3/e769d97bd256423bb197cddc15cee786"
-EXECUTOR_ADDRESS = "0xYourDeployedExecutorContractAddress"
+DRY_RUN = "true"
+ADMIN_FEE_PCT = "0"
 
 [[kv_namespaces]]
 binding = "BOT_KV"
