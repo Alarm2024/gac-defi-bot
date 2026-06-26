@@ -1,8 +1,11 @@
 {
+  "name": "garden-angel",
+  "version": "14.1.0",
+  "type": "module",
   "dependencies": {
-    "viem": "^2.53.1"
+    "viem": "^2.21.0"
   },
   "devDependencies": {
-    "wrangler": "^4.103.0"
+    "wrangler": "^4.0.0"
   }
 }
