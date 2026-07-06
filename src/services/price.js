@@ -1,5 +1,12 @@
-// 🪬🧿✝️  PriceService – v17.2
+// 🪬🧿✝️  PriceService – v17.3
 // ─────────────────────────────────────────────────────────────────────────────
+// v17.3 FIX — STATIC_FALLBACK had ETH/WETH = 3500, badly stale and mismatched
+//   against price_client.py's own last-resort table (_STATIC_PRICES = 1600).
+//   The mismatch meant the two fallback layers of the same oracle chain could
+//   disagree by 2x depending on which one served a given /prices request —
+//   confusing at best, and dangerous for anything computing spread/profit off
+//   it. Both fallback tables now agree: ETH/WETH = 1600.
+//
 // v17.2 FIX over v17.1  (one targeted change):
 //
 //   FIX — WBNB not mapped → price source "unknown" → BSC BUY always blocked.
@@ -58,8 +65,9 @@ const COINBASE_ID = {
 };
 
 const STATIC_FALLBACK = {
-  ETH:  3500,
-  WETH: 3500,
+  ETH:  1600, // v17.3 FIX — was 3500, badly stale and mismatched against
+  WETH: 1600, //   price_client.py's own _STATIC_PRICES (1600). Both
+              //   fallback tables now agree on the same last-resort value.
   BNB:  580,
   WBNB: 580,  // ✅ FIX v17.2 — same static fallback as BNB
   BTC:  65000,
@@ -115,16 +123,29 @@ class CircuitBreaker {
 
 // ── Retry with exponential back-off ──────────────────────────────────────────
 
-async function withRetry(fn, { attempts = 3, baseDelayMs = 800 } = {}) {
+async function withRetry(fn, { attempts = 2, baseDelayMs = 400 } = {}, timeLeftFn) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
+    // Short-circuit before starting an attempt if the global deadline is already gone
+    if (timeLeftFn && timeLeftFn() <= 0) {
+      throw new Error('[PriceService] Deadline exceeded before retry attempt');
+    }
     try {
       return await fn();
     } catch (e) {
       lastErr = e;
       if (e.isRateLimit) throw e;
       if (i < attempts - 1) {
-        await new Promise(r => setTimeout(r, baseDelayMs * 2 ** i));
+        let delay = baseDelayMs * 2 ** i;
+        if (timeLeftFn) {
+          const remaining = timeLeftFn();
+          if (remaining <= 0) {
+            throw new Error('[PriceService] Deadline exceeded during retry backoff');
+          }
+          // Cap backoff sleep so it never overruns the remaining global budget
+          delay = Math.min(delay, remaining);
+        }
+        await new Promise(r => setTimeout(r, delay));
       }
     }
   }
@@ -134,7 +155,7 @@ async function withRetry(fn, { attempts = 3, baseDelayMs = 800 } = {}) {
 // ── PriceService ──────────────────────────────────────────────────────────────
 
 export class PriceService {
-  constructor({ ttlMs = 30_000, timeoutMs = 7_000 } = {}) {
+  constructor({ ttlMs = 30_000, timeoutMs = 3_000 } = {}) {
     this._cache   = new Map();
     this._ttl     = ttlMs;
     this._timeout = timeoutMs;
@@ -149,9 +170,10 @@ export class PriceService {
 
   // ── User-Agent on every fetch (v17.1 fix — prevents Binance/CoinGecko 403) ─
 
-  async _fetchJSON(url) {
+  async _fetchJSON(url, timeoutOverride) {
+    const timeoutMs = timeoutOverride !== undefined ? timeoutOverride : this._timeout;
     const ctrl  = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this._timeout);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
         signal : ctrl.signal,
@@ -172,14 +194,14 @@ export class PriceService {
       if (!res.ok) throw new Error(`HTTP ${res.status} at ${url}`);
       return await res.json();
     } catch (e) {
-      if (e.name === 'AbortError') throw new Error(`Timeout (>${this._timeout}ms) at ${url}`);
+      if (e.name === 'AbortError') throw new Error(`Timeout (>${timeoutMs}ms) at ${url}`);
       throw e;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  async _withSource(name, fn) {
+  async _withSource(name, fn, timeLeftFn) {
     const cb = this._cb[name];
     if (cb.isOpen) {
       throw new Error(
@@ -189,18 +211,34 @@ export class PriceService {
     }
     try {
       const result = await withRetry(async () => {
+        if (timeLeftFn && timeLeftFn() <= 0) {
+          throw new Error(`[PriceService] No budget left to initiate fetch for ${name}`);
+        }
         try {
           return await fn();
         } catch (e) {
           if (e.isRateLimit) {
-            const waitMs = Math.min(e.retryAfterMs ?? 10_000, 15_000);
+            let waitMs = Math.min(e.retryAfterMs ?? 10_000, 15_000);
+            if (timeLeftFn) {
+              const remaining = timeLeftFn();
+              if (remaining < waitMs) {
+                throw new Error(
+                  `[PriceService] Aborting ${name}: rate-limit wait (${waitMs}ms) ` +
+                  `exceeds remaining budget (${remaining}ms)`
+                );
+              }
+              waitMs = Math.min(waitMs, remaining);
+            }
             console.warn(`[PriceService] ${name} rate-limited — waiting ${waitMs}ms`);
             await new Promise(r => setTimeout(r, waitMs));
+            if (timeLeftFn && timeLeftFn() <= 0) {
+              throw new Error(`[PriceService] Deadline exceeded after rate-limit wait for ${name}`);
+            }
             return await fn();
           }
           throw e;
         }
-      }, { attempts: 3, baseDelayMs: 800 });
+      }, { attempts: 3, baseDelayMs: 800 }, timeLeftFn);
       cb.recordSuccess();
       return result;
     } catch (e) {
@@ -211,56 +249,64 @@ export class PriceService {
 
   // ── Source 1: Binance ─────────────────────────────────────────────────────
 
-  async _binance(symbol) {
+  async _binance(symbol, timeLeftFn) {
     return this._withSource('binance', async () => {
+      const perCallTimeout = timeLeftFn ? Math.min(this._timeout, timeLeftFn()) : this._timeout;
       const data = await this._fetchJSON(
-        `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`
+        `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
+        perCallTimeout
       );
       const p = parseFloat(data.price);
       if (!p || !isFinite(p)) throw new Error(`Binance bad price for ${symbol}: ${JSON.stringify(data)}`);
       return p;
-    });
+    }, timeLeftFn);
   }
 
   // ── Source 2: CoinGecko ───────────────────────────────────────────────────
 
-  async _coingecko(id) {
+  async _coingecko(id, timeLeftFn) {
     return this._withSource('coingecko', async () => {
+      const perCallTimeout = timeLeftFn ? Math.min(this._timeout, timeLeftFn()) : this._timeout;
       const data = await this._fetchJSON(
-        `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&precision=2`
+        `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&precision=2`,
+        perCallTimeout
       );
       const p = parseFloat(data[id]?.usd);
       if (!p || !isFinite(p)) throw new Error(`CoinGecko bad price for ${id}: ${JSON.stringify(data)}`);
       return p;
-    });
+    }, timeLeftFn);
   }
 
   // ── Source 3: Kraken ──────────────────────────────────────────────────────
 
-  async _kraken(pair) {
+  async _kraken(pair, timeLeftFn) {
     return this._withSource('kraken', async () => {
+      const perCallTimeout = timeLeftFn ? Math.min(this._timeout, timeLeftFn()) : this._timeout;
       const data = await this._fetchJSON(
-        `https://api.kraken.com/0/public/Ticker?pair=${pair}`
+        `https://api.kraken.com/0/public/Ticker?pair=${pair}`,
+        perCallTimeout
       );
       if (data.error?.length) throw new Error(`Kraken error: ${data.error.join(', ')}`);
       const result = data.result?.[pair] ?? data.result?.[Object.keys(data.result ?? {})[0]];
       const p = parseFloat(result?.c?.[0]);
       if (!p || !isFinite(p)) throw new Error(`Kraken bad price for ${pair}: ${JSON.stringify(result)}`);
       return p;
-    });
+    }, timeLeftFn);
   }
 
   // ── Source 4: Coinbase ────────────────────────────────────────────────────
 
-  async _coinbase(productId) {
+  async _coinbase(productId, timeLeftFn) {
     return this._withSource('coinbase', async () => {
+      const perCallTimeout = timeLeftFn ? Math.min(this._timeout, timeLeftFn()) : this._timeout;
       const data = await this._fetchJSON(
-        `https://api.coinbase.com/v2/prices/${productId}/spot`
+        `https://api.coinbase.com/v2/prices/${productId}/spot`,
+        perCallTimeout
       );
       const p = parseFloat(data.data?.amount);
       if (!p || !isFinite(p)) throw new Error(`Coinbase bad price for ${productId}: ${JSON.stringify(data)}`);
       return p;
-    });
+    }, timeLeftFn);
   }
 
   // ── Core: getPrice ────────────────────────────────────────────────────────
@@ -277,48 +323,72 @@ export class PriceService {
     const hit = this._cache.get(key);
     if (hit && Date.now() - hit.ts < this._ttl) return hit.value;
 
+    // Hard wall-clock budget for the whole waterfall (all 4 sources +
+    // their retries combined). Aligned to the true 10s gateway ceiling
+    // (Wyndham), with a small safety margin so we always have time to
+    // fall through to the static fallback and return before the gateway
+    // drops the connection. Without this, a single asset's sequential
+    // Binance→CoinGecko→Kraken→Coinbase fallback — each with its own
+    // timeout and up to `attempts` retries — could take 30-60s+ before
+    // ever reaching static fallback, which is what was hanging /prices.
+    const MAX_TIMEOUT_MS = 10_000; // Wyndham's strict 10s gateway ceiling
+    const SAFETY_MARGIN_MS = 500;  // leave headroom to return before the gateway cuts us off
+    const MIN_BUDGET_FOR_SOURCE_MS = 600; // don't bother starting a source with less than this left
+    const deadline = Date.now() + (MAX_TIMEOUT_MS - SAFETY_MARGIN_MS);
+    const timeLeft = () => deadline - Date.now();
+
     let value, source;
 
     // 1. Binance
-    try {
-      value  = await this._binance(symbol);
-      source = 'binance';
-      console.info(`[PriceService] ${key} = $${value.toFixed(2)} [binance ✓]`);
-    } catch (e) {
-      console.warn(`[PriceService] Binance failed for ${key}: ${e.message}`);
+    if (timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
+      try {
+        value  = await this._binance(symbol, timeLeft);
+        source = 'binance';
+        console.info(`[PriceService] ${key} = $${value.toFixed(2)} [binance ✓]`);
+      } catch (e) {
+        console.warn(`[PriceService] Binance failed for ${key}: ${e.message}`);
+      }
+    } else {
+      console.warn(`[PriceService] Skipping binance for ${key}: budget depleted (${timeLeft()}ms left)`);
     }
 
     // 2. CoinGecko
-    if (value === undefined && cgId) {
+    if (value === undefined && cgId && timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
       try {
-        value  = await this._coingecko(cgId);
+        value  = await this._coingecko(cgId, timeLeft);
         source = 'coingecko';
         console.info(`[PriceService] ${key} = $${value.toFixed(2)} [coingecko ✓]`);
       } catch (e) {
         console.warn(`[PriceService] CoinGecko failed for ${key}: ${e.message}`);
       }
+    } else if (value === undefined && cgId) {
+      console.warn(`[PriceService] Skipping coingecko for ${key}: budget depleted (${timeLeft()}ms left)`);
     }
 
     // 3. Kraken — null pair means this asset isn't listed, skip silently
-    if (value === undefined && krakenPr) {
+    if (value === undefined && krakenPr && timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
       try {
-        value  = await this._kraken(krakenPr);
+        value  = await this._kraken(krakenPr, timeLeft);
         source = 'kraken';
         console.info(`[PriceService] ${key} = $${value.toFixed(2)} [kraken ✓]`);
       } catch (e) {
         console.warn(`[PriceService] Kraken failed for ${key}: ${e.message}`);
       }
+    } else if (value === undefined && krakenPr) {
+      console.warn(`[PriceService] Skipping kraken for ${key}: budget depleted (${timeLeft()}ms left)`);
     }
 
     // 4. Coinbase
-    if (value === undefined && cbId) {
+    if (value === undefined && cbId && timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
       try {
-        value  = await this._coinbase(cbId);
+        value  = await this._coinbase(cbId, timeLeft);
         source = 'coinbase';
         console.info(`[PriceService] ${key} = $${value.toFixed(2)} [coinbase ✓]`);
       } catch (e) {
         console.warn(`[PriceService] Coinbase failed for ${key}: ${e.message}`);
       }
+    } else if (value === undefined && cbId) {
+      console.warn(`[PriceService] Skipping coinbase for ${key}: budget depleted (${timeLeft()}ms left)`);
     }
 
     // 5. Static fallback — last resort

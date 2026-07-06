@@ -314,6 +314,10 @@ export class StrategistModule {
       ts             : new Date().toISOString(),
     };
 
+    // v17.2 FIX ─ warm base.symbol cache before isLive() check
+    // Guards standalone _scanChain calls that bypass decide() pre-warm.
+    try { await this.price.getPrice(base.symbol); } catch(_) {}
+
     const validation = this._validateDecision(chainKey, decision);
     decision.validation = validation;
 
@@ -356,6 +360,21 @@ export class StrategistModule {
     if (chains.length === 0) throw new Error('[Strategist] No chains to scan');
 
     const results = [];
+
+    // v17.2 FIX ─ pre-warm price cache before scanning chains
+    // Every Worker invocation starts with an empty PriceService cache.
+    // _validateDecision() calls isLive(base.symbol) — without a prior
+    // getPrice() call the cache misses and source is 'unknown', which
+    // permanently blocks BUY regardless of market conditions.
+    const allBases = [...new Set(
+      chains.flatMap(ch => {
+        const cfg = ARBITRAGE_CONFIG[ch];
+        return cfg ? [cfg.base?.symbol,cfg.gasPriceAsset].filter(Boolean):[];
+      })
+    )];
+    await Promise.allSettled(allBases.map(s=>this.price.getPrice(s)));
+    this.log.info('[Strategist] Pre-warmed: '+allBases.join(', '));
+
     for (const c of chains) {
       try {
         results.push(await this._scanChain(c));

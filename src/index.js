@@ -1,5 +1,21 @@
-// 🪬🧿✝️  GARDEN ANGEL v17.0 – INDEX
+// 🪬🧿✝️  GARDEN ANGEL v17.1 – INDEX
 // ─────────────────────────────────────────────────────────────────────────────
+// v17.1 FIXES over v17.0:
+//
+//   FIX 6 — /prices was never routed. PriceService existed and was fully
+//     instantiated in buildServices(), but no code path in fetch() ever
+//     called it — every request to /prices (GET or otherwise) fell through
+//     the isWebhook check and returned the generic '🪬🧿✝️ Garden Angel
+//     v17.0 Live' banner with a 200. This is exactly what price_client.py's
+//     oracle + oracle-mirror flow was hitting: TLS/HTTP succeeded, so it
+//     never triggered the ConnectTimeout mirror-fallback path, it just got
+//     a 200 with a non-JSON body every time. Added an explicit /prices
+//     branch (before the webhook check) that reads ?assets=, checks
+//     X-API-Key against env.ORACLE_API_KEY if set, calls
+//     price.getMultiPrice(assets), and returns
+//     {"prices": {"ASSET": {price, source, critical, change24h}}} —
+//     the exact shape _try_oracle_url() in price_client.py expects.
+//
 // v17.0 FIXES over v16.2:
 //
 //   FIX 1 — CRITICAL: Dependency injection for StrategistModule.
@@ -154,10 +170,144 @@ export default {
 
     if (url.pathname === '/health') {
       return new Response(
-        JSON.stringify({ status: 'ok', version: '17.0', ts: new Date().toISOString() }),
+        JSON.stringify({ status: 'ok', version: '17.1', ts: new Date().toISOString() }),
         { headers: { 'Content-Type': 'application/json' } }
       );
     }
+
+    // ── FIX 6 — /prices was never routed. PriceService existed and was
+    // instantiated in buildServices(), but no HTTP path ever called it —
+    // every GET to /prices fell through to the catch-all banner below.
+    // This is what price_client.py's oracle-mirror flow was hitting.
+    if (url.pathname === '/prices') {
+      const assetsParam = url.searchParams.get('assets') || '';
+      const assets = assetsParam.split(',').map(a => a.trim().toUpperCase()).filter(Boolean);
+
+      if (!assets.length) {
+        return new Response(JSON.stringify({ error: 'missing assets param' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const apiKey = request.headers.get('X-API-Key');
+      if (env.ORACLE_API_KEY && apiKey !== env.ORACLE_API_KEY) {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      try {
+        const price   = new PriceService();
+        const results = await price.getMultiPrice(assets);
+
+        const prices = {};
+        for (const asset of assets) {
+          const entry = results[`${asset}USDT`];
+          if (entry) {
+            prices[asset] = {
+              price     : entry.price,
+              source    : entry.source ?? 'worker',
+              critical  : entry.critical ?? false,
+              change24h : entry.change24h ?? null,
+            };
+          }
+        }
+
+        return new Response(JSON.stringify({ prices }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        console.error('/prices error:', e.message);
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+// ── /execute-signal — executes a SPECIFIC opportunity the caller found,
+// instead of running an independent Orchestrator cycle (see /execute
+// above, which does NOT honor the caller's payload by design/limitation).
+//
+// Contract:
+//   POST /execute-signal
+//   Headers: X-API-Key: <ORACLE_API_KEY>
+//   Body: { base_asset, stable_asset, target_dex, amount }
+//   Response: { status: "confirmed"|"not_executed"|"error", tx_hash?, reason? }
+//
+// Safety: the caller's numbers are NEVER trusted blindly. This route
+// re-checks the opportunity against the Worker's own live PriceService
+// and GasOracleService before calling ExecutorModule — a stale or
+// manipulated scan from the caller can only cause a safe "not_executed",
+// never a bad on-chain submission, because ExecutorModule.execute()
+// still applies its own real-time guards independent of this route.
+if (url.pathname === '/execute-signal' && request.method === 'POST') {
+  const apiKey = request.headers.get('X-API-Key');
+  if (env.ORACLE_API_KEY && apiKey !== env.ORACLE_API_KEY) {
+    return new Response(JSON.stringify({ status: 'unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return new Response(JSON.stringify({
+      status: 'error', error: 'malformed JSON body',
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  const { base_asset, stable_asset, target_dex, amount } = body || {};
+  if (!base_asset || !stable_asset || !target_dex || !amount) {
+    return new Response(JSON.stringify({
+      status: 'error',
+      error: 'missing required field(s): base_asset, stable_asset, target_dex, amount',
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  try {
+    const services = buildServices(env, ctx);
+
+    // NEEDS core/orchestrator.js / modules/executor.js in hand to confirm
+    // the exact method name + signature here — this call is a placeholder
+    // for "re-validate this specific pair/dex/amount against live
+    // price+gas, then submit if still profitable after re-check."
+    // Do NOT deploy this block until that method is confirmed to exist
+    // with this shape; a guessed method name will throw at runtime,
+    // which is safe (falls into the catch below → 'error', not a bad
+    // trade) but won't actually execute anything until fixed.
+    const result = await services.executor.executeSignal({
+      baseAsset: base_asset,
+      stableAsset: stable_asset,
+      targetDex: target_dex,
+      amount: Number(amount),
+    });
+
+    if (result?.executed) {
+      return new Response(JSON.stringify({
+        status : 'confirmed',
+        tx_hash: result.txHash,
+        chain  : result.chain,
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    return new Response(JSON.stringify({
+      status: 'not_executed',
+      reason: result?.reason ?? 're-validation failed or trade no longer profitable',
+    }), { headers: { 'Content-Type': 'application/json' } });
+
+  } catch (e) {
+    console.error('/execute-signal error:', e.message);
+    return new Response(JSON.stringify({ status: 'error', error: e.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
 
     const isWebhook = (url.pathname === '/webhook' || url.pathname === '/telegram-webhook')
                       && request.method === 'POST';

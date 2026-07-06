@@ -13,14 +13,20 @@
 //       2. cfg.fallbackRpcEnvKey  (e.g. 'ETH_RPC_SECONDARY')
 //       3. Hardcoded alt patterns: ETH_RPC_URL, ETH_ALCHEMY_URL, BSC_RPC_URL …
 //     The first non-empty value wins. Only warns if ALL candidates are empty.
+//
+//   FIX — viem v2 import path.
+//     privateKeyToAccount is no longer exported from viem's root package —
+//     it moved to viem/accounts. Root import caused:
+//       "No matching export in node_modules/viem/_esm/index.js for import
+//        'privateKeyToAccount'" at build time (deploy always failed).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
   createPublicClient,
   createWalletClient,
   http,
-  privateKeyToAccount,
 } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import { CHAIN_REGISTRY } from '../config/constants.js';
 
 // Aave V3 Pool addresses per chain

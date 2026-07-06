@@ -1,33 +1,35 @@
-// 🪬🧿✝️  BlockchainService – v16.2
+// 🪬🧿✝️  BlockchainService – v17.0
 // ─────────────────────────────────────────────────────────────────────────────
-// Provides viem public + wallet clients for every chain in CHAIN_REGISTRY.
-// Handles DRY_RUN mode transparently — callers never need to branch on it.
+// v17 FIX over v16.2:
 //
-// Public API:
-//   getPublicClient(chain)                          → viem PublicClient
-//   getWalletClient(chain)                          → viem WalletClient (async)
-//   sendTransaction(chain, to, data, gasLimit)      → txHash string
-//   waitForReceipt(chain, txHash, opts?)            → viem TransactionReceipt
-//   checkAave(chain)                                → { healthy, reserves }
-//   call(chain, to, data)                           → return data (hex)
+//   FIX — RPC URL multi-key fallback.
+//     v16 read only cfg.rpcEnvKey (e.g. 'ETH_RPC_URL'). If wrangler.toml used
+//     a different naming convention (e.g. 'ETH_RPC_PRIMARY'), _rpcUrl() returned
+//     undefined and the bot silently fell back to viem's public default, causing
+//     rate-limit errors and unreliable on-chain quotes.
+//
+//     v17 _rpcUrl() tries the following env keys in order for each chain:
+//       1. cfg.rpcEnvKey          (e.g. 'ETH_RPC_PRIMARY')
+//       2. cfg.fallbackRpcEnvKey  (e.g. 'ETH_RPC_SECONDARY')
+//       3. Hardcoded alt patterns: ETH_RPC_URL, ETH_ALCHEMY_URL, BSC_RPC_URL …
+//     The first non-empty value wins. Only warns if ALL candidates are empty.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { privateKeyToAccount } from 'viem/accounts';
 import {
   createPublicClient,
   createWalletClient,
   http,
 } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
 import { CHAIN_REGISTRY } from '../config/constants.js';
 
 // Aave V3 Pool addresses per chain
 const AAVE_V3_POOL = {
   ETH      : '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
   BSC      : '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',
-  UNICHAIN : null,   // Aave not yet deployed on Unichain
+  UNICHAIN : null,
 };
 
-// Minimal ABI for Aave health-check
 const AAVE_RESERVES_ABI = [{
   inputs         : [],
   name           : 'getReservesList',
@@ -36,33 +38,59 @@ const AAVE_RESERVES_ABI = [{
   type           : 'function',
 }];
 
+// ── Per-chain alternative env key patterns to try ─────────────────────────────
+// If a user's wrangler.toml uses a different naming convention from CHAIN_REGISTRY,
+// these extras are tried before giving up and using the public default.
+const ALT_RPC_KEYS = {
+  ETH     : ['ETH_RPC_URL', 'ETH_RPC_PRIMARY', 'ETH_ALCHEMY_URL', 'ETH_INFURA_URL', 'ALCHEMY_ETH_RPC'],
+  BSC     : ['BSC_RPC_URL', 'BSC_RPC_PRIMARY', 'BSC_ALCHEMY_URL'],
+  UNICHAIN: ['UNICHAIN_RPC_URL', 'UNICHAIN_RPC_PRIMARY'],
+};
+
 export class BlockchainService {
   constructor(env, ctx) {
     this.env  = env;
     this.ctx  = ctx;
-    this._pub = new Map();   // chain → PublicClient  (sync cache)
-    this._wal = new Map();   // chain → WalletClient  (sync cache after first build)
+    this._pub = new Map();
+    this._wal = new Map();
   }
 
   // ── Internal helpers ──────────────────────────────────────────────────────
 
   _chainCfg(chain) {
     const cfg = CHAIN_REGISTRY[chain];
-    if (!cfg) throw new Error(`[Blockchain] Unknown chain: "${chain}". Valid: ${Object.keys(CHAIN_REGISTRY).join(', ')}`);
+    if (!cfg) throw new Error(
+      `[Blockchain] Unknown chain: "${chain}". Valid: ${Object.keys(CHAIN_REGISTRY).join(', ')}`
+    );
     return cfg;
   }
 
+  // ── FIX: Multi-key RPC URL resolution ─────────────────────────────────────
+  // Tries cfg.rpcEnvKey, cfg.fallbackRpcEnvKey, then ALT_RPC_KEYS[chain].
+  // Returns the first non-empty value, or undefined (viem public default).
+
   _rpcUrl(chain) {
-    const cfg      = this._chainCfg(chain);
-    const primary  = this.env[cfg.rpcEnvKey];
-    const fallback = cfg.fallbackRpcEnvKey ? this.env[cfg.fallbackRpcEnvKey] : null;
-    if (!primary && !fallback) {
-      console.warn(`[Blockchain] No RPC URL set for ${chain} (env key: ${cfg.rpcEnvKey}). Using public default.`);
+    const cfg = this._chainCfg(chain);
+
+    const candidates = [
+      cfg.rpcEnvKey,
+      cfg.fallbackRpcEnvKey,
+      ...(ALT_RPC_KEYS[chain] ?? []),
+    ].filter(Boolean);
+
+    for (const key of candidates) {
+      const val = this.env[key];
+      if (val && val.startsWith('http')) return val;
     }
-    return primary || fallback || undefined;   // undefined → viem uses its built-in default transport
+
+    console.warn(
+      `[Blockchain] No RPC URL found for ${chain}. ` +
+      `Tried: ${candidates.join(', ')}. Using viem public default — expect rate limits.`
+    );
+    return undefined;
   }
 
-  // ── Public clients (read-only, no private key) ────────────────────────────
+  // ── Public clients ────────────────────────────────────────────────────────
 
   getPublicClient(chain = 'ETH') {
     if (this._pub.has(chain)) return this._pub.get(chain);
@@ -77,9 +105,7 @@ export class BlockchainService {
     return client;
   }
 
-  // ── Wallet clients (requires PRIVATE_KEY) ────────────────────────────────
-  // Async because privateKeyToAccount is synchronous but we want the error
-  // to surface as a rejected promise, consistent with caller await patterns.
+  // ── Wallet clients ────────────────────────────────────────────────────────
 
   async getWalletClient(chain = 'ETH') {
     if (this._wal.has(chain)) return this._wal.get(chain);
@@ -100,9 +126,7 @@ export class BlockchainService {
     return client;
   }
 
-  // ── sendTransaction ────────────────────────────────────────────────────────
-  // In DRY_RUN mode: returns a mock hash, nothing is broadcast.
-  // In live mode   : signs and broadcasts via walletClient.
+  // ── sendTransaction ───────────────────────────────────────────────────────
 
   async sendTransaction(chain = 'ETH', to, data, gasLimit) {
     if (this.env.DRY_RUN === 'true') {
@@ -112,8 +136,7 @@ export class BlockchainService {
     }
 
     const wallet = await this.getWalletClient(chain);
-
-    const hash = await wallet.sendTransaction({
+    const hash   = await wallet.sendTransaction({
       to,
       data,
       ...(gasLimit != null ? { gas: gasLimit } : {}),
@@ -126,7 +149,6 @@ export class BlockchainService {
   // ── waitForReceipt ────────────────────────────────────────────────────────
 
   async waitForReceipt(chain = 'ETH', txHash, { confirmations = 1, timeout = 120_000 } = {}) {
-    // Dry-run hashes are synthetic — return a synthetic receipt immediately
     if (this.env.DRY_RUN === 'true' || (typeof txHash === 'string' && txHash.startsWith('0xdryrun'))) {
       console.log(`[Blockchain] DRY_RUN — synthetic receipt for ${txHash}`);
       return {
@@ -138,12 +160,7 @@ export class BlockchainService {
     }
 
     const pub     = this.getPublicClient(chain);
-    const receipt = await pub.waitForTransactionReceipt({
-      hash: txHash,
-      confirmations,
-      timeout,
-    });
-
+    const receipt = await pub.waitForTransactionReceipt({ hash: txHash, confirmations, timeout });
     console.log(
       `[Blockchain] Receipt for ${txHash.slice(0, 12)}… on ${chain}: ${receipt.status} ` +
       `(gas used: ${receipt.gasUsed?.toString()})`
@@ -151,8 +168,7 @@ export class BlockchainService {
     return receipt;
   }
 
-  // ── call (read-only eth_call, no gas) ────────────────────────────────────
-  // Useful for on-chain simulations (quoting DEX prices, etc.).
+  // ── call (read-only eth_call) ─────────────────────────────────────────────
 
   async call(chain = 'ETH', to, data) {
     const pub    = this.getPublicClient(chain);
@@ -160,15 +176,11 @@ export class BlockchainService {
     return result.data ?? '0x';
   }
 
-  // ── checkAave — health-check for /flashloan command ───────────────────────
-  // Calls getReservesList() on the Aave V3 Pool. If it returns an array
-  // the pool is live and properly deployed on this chain.
+  // ── checkAave ─────────────────────────────────────────────────────────────
 
   async checkAave(chain = 'ETH') {
     const poolAddress = AAVE_V3_POOL[chain];
-    if (!poolAddress) {
-      throw new Error(`Aave V3 is not deployed on ${chain}`);
-    }
+    if (!poolAddress) throw new Error(`Aave V3 is not deployed on ${chain}`);
 
     const pub    = this.getPublicClient(chain);
     const result = await pub.readContract({
@@ -178,7 +190,7 @@ export class BlockchainService {
     });
 
     if (!Array.isArray(result) || result.length === 0) {
-      throw new Error(`Aave V3 Pool on ${chain} returned empty reserves — may be wrong address or wrong network`);
+      throw new Error(`Aave V3 Pool on ${chain} returned empty reserves`);
     }
 
     console.log(`[Blockchain] Aave V3 (${chain}) healthy — ${result.length} reserves listed`);
