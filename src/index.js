@@ -190,13 +190,19 @@ export default {
         });
       }
 
-      const apiKey = request.headers.get('X-API-Key');
-      if (env.ORACLE_API_KEY && apiKey !== env.ORACLE_API_KEY) {
-        return new Response(JSON.stringify({ error: 'unauthorized' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
+      let token = request.headers.get('X-API-Key');
+if (!token) {
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  }
+}
+if (env.ORACLE_API_KEY && token !== env.ORACLE_API_KEY) {
+  return new Response(JSON.stringify({ status: 'unauthorized' }), {
+    status: 401,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
       try {
         const price   = new PriceService();
