@@ -317,7 +317,7 @@ if (url.pathname === '/execute-signal' && request.method === 'POST') {
 
     const isWebhook = (url.pathname === '/webhook' || url.pathname === '/telegram-webhook')
                       && request.method === 'POST';
-    if (!isWebhook) return new Response('🪬🧿✝️ Garden Angel v17.0 Live', { status: 200 });
+  return new Response(JSON.stringify({ status: "error", error: "Not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
 
     try {
       const update = await request.json();
