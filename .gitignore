@@ -10,3 +10,7 @@ dist/
 *.swo
 *~
 .*.swp
+
+# Python bytecode cache
+__pycache__/
+*.pyc
