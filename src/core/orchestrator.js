@@ -27,25 +27,25 @@ export class Orchestrator {
       await this.kv.putJSON(KV_KEYS.BOT_STATE, state);
 
       const priceData = await price.fetch();
-      const gasData = await gasOracle.fetchForChain('ETH', priceData.ETHUSDT?.price || 3500);
+      const gasData = await gasOracle.fetchForChain('BSC', priceData.BNBUSDT?.price || 580);
       const strategistRes = await strategist.decide(priceData, gasData);
 
       state.lastSignal = strategistRes.signal;
-      state.lastChain = 'ETH';
+      state.lastChain = 'BSC';
       state.lastNet = strategistRes.netAfterFee?.toFixed(2) || null;
 
       let executorRes = { executed: false, reason: 'no_signal' };
 
       if (strategistRes.signal === 'BUY') {
         try {
-          executorRes = await executor.execute(strategistRes, 'ETH');
+          executorRes = await executor.execute(strategistRes, 'BSC');
           if (executorRes.executed) {
             await circuitBreaker.recordSuccess();
             state.totalBuy = (state.totalBuy || 0) + 1;
           }
         } catch (err) {
           const reason = err.message.slice(0, 200);
-          await tradeLogger.logFailure(reason, { chain: 'ETH', gwei: gasData.gwei });
+          await tradeLogger.logFailure(reason, { chain: 'BSC', gwei: gasData.gwei });
           await circuitBreaker.recordFailure(reason, false);
           executorRes = { executed: false, reason };
           this.log.error('Execution failed', { reason });
@@ -54,13 +54,13 @@ export class Orchestrator {
         await tradeLogger.logFailure(strategistRes.holdReason || 'signal_hold', {
           spread: strategistRes.grossReturn / strategistRes.loanAmount,
           netAfterFee: strategistRes.netAfterFee,
-          chain: 'ETH'
+          chain: 'BSC'
         });
       }
 
       state.status = 'idle';
       await this.kv.putJSON(KV_KEYS.BOT_STATE, state);
-      return { outcome: 'CYCLE_COMPLETE', cycle: state.cycle, targetChain: 'ETH', executor: executorRes };
+      return { outcome: 'CYCLE_COMPLETE', cycle: state.cycle, targetChain: 'BSC', executor: executorRes };
     } finally {
       await circuitBreaker.releaseLock();
     }

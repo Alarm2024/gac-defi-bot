@@ -3,7 +3,7 @@
   "version": "14.1.0",
   "type": "module",
   "dependencies": {
-    "viem": "^2.21.0"
+    "viem": "^2.54.6"
   },
   "devDependencies": {
     "wrangler": "^4.107.0"

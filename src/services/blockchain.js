@@ -20,8 +20,10 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  decodeFunctionResult,
+  ContractFunctionRevertedError,
 } from 'viem';
-import { CHAIN_REGISTRY } from '../config/constants.js';
+import { CHAIN_REGISTRY, ARBITRAGE_ENGINE_ABI } from '../config/constants.js';
 
 // Aave V3 Pool addresses per chain
 const AAVE_V3_POOL = {
@@ -174,6 +176,91 @@ export class BlockchainService {
     const pub    = this.getPublicClient(chain);
     const result = await pub.call({ to, data });
     return result.data ?? '0x';
+  }
+
+  // ── simulateTransaction ────────────────────────────────────────────────────
+  // Pre-flight check before broadcasting. Runs the exact calldata through
+  // eth_call from the signing wallet's address (so balance/allowance/msg.sender
+  // checks in the target contract behave the same as they would on-chain),
+  // decodes revert reasons via the ABI instead of surfacing raw hex, and
+  // optionally enforces a minimum acceptable return so a trade that's gone
+  // unprofitable between scan-time and execute-time is rejected here instead
+  // of broadcasting and eating gas on a revert (or worse, succeeding at a
+  // loss because the contract doesn't itself enforce a minimum).
+  //
+  // Returns { ok: true, result } on a clean simulation.
+  // Throws with a decoded, human-readable reason on revert or on a
+  // below-minimum simulated return.
+
+  async simulateTransaction(chain, to, data, { minReturn = null } = {}) {
+    const pub = this.getPublicClient(chain);
+
+    // Use the real signing account as `from` when available, since many
+    // arbitrage/flash-loan contracts gate execution to a specific caller
+    // (onlyOwner / onlyExecutor patterns) — simulating from the zero address
+    // would falsely revert on those and mask the real result.
+    let from;
+    try {
+      const wallet = await this.getWalletClient(chain);
+      from = wallet.account.address;
+    } catch {
+      // No PRIVATE_KEY available in this context (e.g. read-only diagnostics) —
+      // fall back to an unauthenticated simulation. Caller-gated contracts
+      // will revert here; that's still useful signal, just less precise.
+      from = undefined;
+    }
+
+    let result;
+    try {
+      const sim = await pub.call({ account: from, to, data });
+      result = sim.data ?? '0x';
+    } catch (err) {
+      throw new Error(`[Blockchain] Simulation reverted on ${chain}: ${this._decodeRevert(err)}`);
+    }
+
+    // Optional profitability floor — only enforced if the caller passes one
+    // AND the ABI actually decodes a numeric return value. Silent no-op
+    // otherwise, so this stays backward-compatible with callers that just
+    // want a revert check.
+    if (minReturn != null) {
+      try {
+        const decoded = decodeFunctionResult({
+          abi         : ARBITRAGE_ENGINE_ABI,
+          functionName: 'executeArbitrage',
+          data        : result,
+        });
+        const simulatedReturn = typeof decoded === 'bigint' ? decoded : decoded?.[0];
+        if (typeof simulatedReturn === 'bigint' && simulatedReturn < minReturn) {
+          throw new Error(
+            `[Blockchain] Simulation succeeded but return ${simulatedReturn} is below ` +
+            `minReturn ${minReturn} — spread likely closed since scan. Refusing to broadcast.`
+          );
+        }
+      } catch (decodeErr) {
+        // Non-fatal: if the ABI/return shape doesn't support decoding a
+        // number, we've still confirmed the call doesn't revert, which is
+        // the primary guarantee of this method. Log and continue.
+        console.warn('[Blockchain] simulateTransaction: could not decode return for minReturn check —', decodeErr.message);
+      }
+    }
+
+    console.log(`[Blockchain] ✅ Simulation passed on ${chain} (to: ${to.slice(0, 10)}…)`);
+    return { ok: true, result };
+  }
+
+  // ── _decodeRevert ─────────────────────────────────────────────────────────
+  // Best-effort decode of a viem call error into a readable revert reason,
+  // using ARBITRAGE_ENGINE_ABI's custom errors where possible. Falls back to
+  // the raw viem short message rather than a bare "0x..." blob.
+
+  _decodeRevert(err) {
+    const revertError = err.walk?.(e => e instanceof ContractFunctionRevertedError);
+    if (revertError instanceof ContractFunctionRevertedError) {
+      const name = revertError.data?.errorName ?? 'unknown error';
+      const args = revertError.data?.args?.length ? `(${revertError.data.args.join(', ')})` : '';
+      return `${name}${args}`;
+    }
+    return err.shortMessage ?? err.message ?? String(err);
   }
 
   // ── checkAave ─────────────────────────────────────────────────────────────

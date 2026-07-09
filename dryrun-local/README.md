@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "garden-angel" generated at 2026-07-07T16:06:58.597Z.

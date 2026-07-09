@@ -188,6 +188,50 @@ export const ARBITRAGE_ENGINE_ABI = [
     stateMutability: 'nonpayable',
     type: 'function',
   },
+  // v17.1 FIX — startArbitrage was completely absent from this ABI, even
+  // though executor.js called encodeFunctionData({ abi: ARBITRAGE_ENGINE_ABI,
+  // functionName: 'startArbitrage', ... }) directly against it. Added here
+  // to match contract_manager.py's FLASH_ARBITRAGE_V2_ABI exactly (the
+  // Python side's source of truth for the real deployed contract) —
+  // 9 args, with pathBuy/pathSell as full address[] swap paths rather
+  // than a single intermediate token. See executor.js's v17.1 changelog
+  // for the full incident writeup on why this mismatch matters.
+  {
+    inputs: [
+      { name: 'asset',               type: 'address'   },
+      { name: 'amount',              type: 'uint256'   },
+      { name: 'routerBuy',           type: 'address'   },
+      { name: 'routerSell',          type: 'address'   },
+      { name: 'pathBuy',             type: 'address[]' },
+      { name: 'pathSell',            type: 'address[]' },
+      { name: 'minIntermediateOut',  type: 'uint256'   },
+      { name: 'minFinalOut',         type: 'uint256'   },
+      { name: 'minProfit',           type: 'uint256'   },
+    ],
+    name: 'startArbitrage',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  // v17.1 — also added for completeness/future use: quoteRoundTrip, matching
+  // contract_manager.py's quote_round_trip(). Not currently called from
+  // executor.js, but useful if/when a pre-broadcast quote check is wired in.
+  {
+    inputs: [
+      { name: 'routerBuy',  type: 'address'   },
+      { name: 'routerSell', type: 'address'   },
+      { name: 'pathBuy',    type: 'address[]' },
+      { name: 'pathSell',   type: 'address[]' },
+      { name: 'amount',     type: 'uint256'   },
+    ],
+    name: 'quoteRoundTrip',
+    outputs: [
+      { name: 'intermediateOut', type: 'uint256' },
+      { name: 'finalOut',        type: 'uint256' },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
 ];
 
 export const GAS_PAYMASTER_ABI = [
@@ -248,4 +292,4 @@ export const UNISWAP_ROUTER_ABI = [
     stateMutability: 'view',
     type: 'function',
   },
-];
+]
