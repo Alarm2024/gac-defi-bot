@@ -124,6 +124,47 @@ These are correctness/safety fixes to the code that is actually in this repo:
 
 ---
 
+## 3a. Runtime findings from the live HF Space log (2026-07-09)
+
+The production startup log surfaced things the source alone doesn't, and they
+bear directly on "is the execution path under my exclusive control?" — the
+honest answer today is **no, not fully.**
+
+- **Your price oracle AND trade-execution endpoint run on someone else's
+  infrastructure.** `ORACLE_URL=https://garden-angel-production.elghaly.workers.dev`
+  and the Telegram proxy `tg-proxy.elghaly.workers.dev` are **`elghaly`**
+  Cloudflare Workers; your own host is **`wyndham`**
+  (`wyndham.pythonanywhere.com`). On every BUY the scanner calls the oracle's
+  `/execute` to confirm/execute the trade, and it reads prices from `/prices`.
+  Whoever controls that Worker controls the price the bot trusts and the
+  execution confirmation. **This is the single biggest gap between the current
+  setup and "exclusive control."** Fix: deploy the (now-corrected) Worker in
+  this repo under **your own** domain and point `ORACLE_URL` at it.
+- **Both oracle endpoints are currently broken** — they return the plain-text
+  banner `Bot Live` instead of JSON (`oracle-mirror non-JSON (200). Body: Bot
+  Live`), and `elghaly`'s Worker returns `HTTP 403 error 1010`. That non-JSON
+  banner is exactly the `/prices` / dead-`404` bug fixed in §2.1–2.2 of this PR.
+  Net effect right now: the scanner finds opportunities (e.g. `BUY on BSC: WBTC
+  … net +$213.95`) but **every execution is skipped** ("Execution unconfirmed").
+  So despite `dry_run=False`, no arbitrage trades are actually landing.
+- **Two wallet addresses you must independently verify are yours:**
+  - Signing / gas hot wallet: `0x535151bDE5B471f5925b445266C70f4f0961193d`
+    (this is the one you fund).
+  - Payout / cold destination `PAYOUT_WALLET`: `0x2C256C78d7…`
+    (this is where sweeps go).
+  Both come from env vars (not hardcoded), and they are correctly *different*
+  addresses (proper hot/cold split). But confirm you personally hold the keys
+  to **both** — especially `0x2C256C78d7…`. If this Space was set up for you
+  with `PAYOUT_WALLET` pre-filled, that address is where your profit leaves to,
+  and the source cannot tell you whether it's yours.
+- **Telegram bot token transits third-party proxies.** Routes include
+  `tg-proxy.elghaly.workers.dev` and `garden-angel-production.elghaly.workers.dev`.
+  Any Worker the token passes through can read it. Consider rotating the bot
+  token and routing Telegram only through your own host / `api.telegram.org`.
+- **Good news in the log:** secret redaction works (`/bot***REDACTED***/`), the
+  hot/cold split is real, price data falls back to OKX (live) when the oracle is
+  down, and the BSC-only hard-lock is active.
+
 ## 4. "Mempool monitoring" note
 
 There is no mempool/pending-transaction monitoring in the codebase. The Worker
