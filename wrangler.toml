@@ -9,8 +9,6 @@ compatibility_date = "2026-07-09"
 
 # Scheduled Orchestrator cycle — drives the src/index.js `scheduled()` handler.
 # Adjust the cadence to taste (this is every 5 minutes).
-[triggers]
-crons = ["*/5 * * * *"]
 
 # KV namespace used everywhere as env.BOT_KV.
 # ⚠️ REQUIRED: replace `id` with YOUR real namespace id before the deploy will
@@ -19,7 +17,7 @@ crons = ["*/5 * * * *"]
 #    (by design — better a clear error than a worker deployed without its KV).
 [[kv_namespaces]]
 binding = "BOT_KV"
-id = "REPLACE_WITH_YOUR_BOT_KV_NAMESPACE_ID"
+id = "f7be98ba51a34e34bf661795ceff55ca"
 
 # NOTE: secrets are NOT declared here — keep them out of source. Set each with
 #   `npx wrangler secret put <NAME>`  (or in the dashboard):
@@ -30,3 +28,6 @@ id = "REPLACE_WITH_YOUR_BOT_KV_NAMESPACE_ID"
 #
 # If the deploy later fails with a Node built-in / "nodejs_compat" error from
 # viem, add:  compatibility_flags = ["nodejs_compat"]  to the top of this file.
+
+[triggers]
+crons = ["*/5 * * * *"]
