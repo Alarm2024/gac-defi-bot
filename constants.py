@@ -18,7 +18,8 @@ SECURITY MODEL — read this before trusting the file
 Usage
     from constants import (
         CHAIN_REGISTRY, ARBITRAGE_CONFIG, CFG, KV_KEYS,
-        SECRETS, ENDPOINTS, PAYOUT, summary, validate,
+        SECRET_ENV_KEYS, ENDPOINT_ENV_KEYS, FUND_ROUTING_ENV_KEYS,
+        summary, validate,
     )
     print(summary())            # human-readable config dump (secrets redacted)
     for w in validate():
@@ -320,17 +321,25 @@ def validate() -> list[str]:
     """Return human-readable warnings for missing/likely-misconfigured env.
     Does not raise and never echoes a secret value."""
     warnings: list[str] = []
-    if not env("PAYOUT_WALLET"):
-        warnings.append("PAYOUT_WALLET unset — on-chain sweeps will no-op.")
-    if not env("PAYOUT_PRIVATE_KEY"):
-        warnings.append("PAYOUT_PRIVATE_KEY unset — payouts are accounting-only.")
+
+    # Chain-aware: an ETH deployment (PAYOUT_CHAIN=ETH + ALLOW_ETH=1) uses the
+    # *_ETH wallet/key vars, so checking the BSC names would false-positive.
+    payout_chain = env("PAYOUT_CHAIN", "BSC").upper()
+    is_eth = payout_chain == "ETH" and env("ALLOW_ETH", "0") == "1"
+    wallet_key = "PAYOUT_WALLET_ETH" if is_eth else "PAYOUT_WALLET"
+    pk_key = "PAYOUT_PRIVATE_KEY_ETH" if is_eth else "PAYOUT_PRIVATE_KEY"
+
+    if not env(wallet_key):
+        warnings.append(f"{wallet_key} unset — on-chain sweeps will no-op.")
+    if not env(pk_key):
+        warnings.append(f"{pk_key} unset — payouts are accounting-only.")
     if not env("PAYOUT_PASSWORD"):
         warnings.append("PAYOUT_PASSWORD unset — /payout command disabled.")
     if not env("TELEGRAM_BOT_TOKEN"):
         warnings.append("TELEGRAM_BOT_TOKEN unset — Telegram control disabled.")
     if not env("ORACLE_URL"):
         warnings.append("ORACLE_URL unset — price oracle source unavailable.")
-    if env("PAYOUT_CHAIN", "BSC").upper() != "BSC" and env("ALLOW_ETH", "0") != "1":
+    if payout_chain != "BSC" and env("ALLOW_ETH", "0") != "1":
         warnings.append("PAYOUT_CHAIN != BSC but ALLOW_ETH != 1 — Python payout hard-locked to BSC.")
     return warnings
 
