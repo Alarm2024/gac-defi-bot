@@ -250,74 +250,57 @@ if (env.ORACLE_API_KEY && token !== env.ORACLE_API_KEY) {
 // never a bad on-chain submission, because ExecutorModule.execute()
 // still applies its own real-time guards independent of this route.
 if (url.pathname === '/execute-signal' && request.method === 'POST') {
+  // Fail CLOSED: this route can trigger on-chain execution, so it must
+  // never be reachable without an API key. If ORACLE_API_KEY is not
+  // configured, deny outright rather than skipping the check (the old
+  // `env.ORACLE_API_KEY && …` form left the route wide open whenever the
+  // secret was unset). Execution must stay under the operator's explicit
+  // control.
+  if (!env.ORACLE_API_KEY) {
+    return new Response(JSON.stringify({
+      status: 'forbidden',
+      error : 'ORACLE_API_KEY is not configured — /execute-signal is disabled',
+    }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+  }
   const apiKey = request.headers.get('X-API-Key');
-  if (env.ORACLE_API_KEY && apiKey !== env.ORACLE_API_KEY) {
+  if (apiKey !== env.ORACLE_API_KEY) {
     return new Response(JSON.stringify({ status: 'unauthorized' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
     });
   }
 
-  let body;
-  try {
-    body = await request.json();
-  } catch (e) {
-    return new Response(JSON.stringify({
-      status: 'error', error: 'malformed JSON body',
-    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  const { base_asset, stable_asset, target_dex, amount } = body || {};
-  if (!base_asset || !stable_asset || !target_dex || !amount) {
-    return new Response(JSON.stringify({
-      status: 'error',
-      error: 'missing required field(s): base_asset, stable_asset, target_dex, amount',
-    }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-  }
-
-  try {
-    const services = buildServices(env, ctx);
-
-    // NEEDS core/orchestrator.js / modules/executor.js in hand to confirm
-    // the exact method name + signature here — this call is a placeholder
-    // for "re-validate this specific pair/dex/amount against live
-    // price+gas, then submit if still profitable after re-check."
-    // Do NOT deploy this block until that method is confirmed to exist
-    // with this shape; a guessed method name will throw at runtime,
-    // which is safe (falls into the catch below → 'error', not a bad
-    // trade) but won't actually execute anything until fixed.
-    const result = await services.executor.executeSignal({
-      baseAsset: base_asset,
-      stableAsset: stable_asset,
-      targetDex: target_dex,
-      amount: Number(amount),
-    });
-
-    if (result?.executed) {
-      return new Response(JSON.stringify({
-        status : 'confirmed',
-        tx_hash: result.txHash,
-        chain  : result.chain,
-      }), { headers: { 'Content-Type': 'application/json' } });
-    }
-
-    return new Response(JSON.stringify({
-      status: 'not_executed',
-      reason: result?.reason ?? 're-validation failed or trade no longer profitable',
-    }), { headers: { 'Content-Type': 'application/json' } });
-
-  } catch (e) {
-    console.error('/execute-signal error:', e.message);
-    return new Response(JSON.stringify({ status: 'error', error: e.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+  // NOT IMPLEMENTED. ExecutorModule exposes no `executeSignal()` method —
+  // the previous revision called one that does not exist (it would throw
+  // at runtime). Rather than wire an externally-supplied payload straight
+  // into the on-chain execution path (a control-surface expansion the
+  // operator has not authorised), this route is explicitly disabled.
+  // On-chain execution happens ONLY through the scheduled Orchestrator
+  // cycle, which re-derives every opportunity from the Worker's own live
+  // price + gas services. Re-enable this only after ExecutorModule gains a
+  // reviewed executeSignal() that re-validates the caller's numbers.
+  return new Response(JSON.stringify({
+    status: 'not_implemented',
+    error : 'external signal execution is disabled by design; ' +
+            'execution runs only via the scheduled Orchestrator cycle',
+  }), { status: 501, headers: { 'Content-Type': 'application/json' } });
 }
 
     const isWebhook = (url.pathname === '/webhook' || url.pathname === '/telegram-webhook')
                       && request.method === 'POST';
-  return new Response(JSON.stringify({ status: "error", error: "Not found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+
+    // Anything that isn't the Telegram webhook falls through to a 404.
+    // NOTE: a previous revision left an UNCONDITIONAL 404 return on this
+    // line, which made the entire command router below unreachable dead
+    // code — every /webhook POST returned "Not found" and no Telegram
+    // command (status, hunt, payout, circuit, …) ever ran. The guard is
+    // now conditional so the operator's control surface actually works.
+    if (!isWebhook) {
+      return new Response(
+        JSON.stringify({ status: 'error', error: 'Not found' }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     try {
       const update = await request.json();

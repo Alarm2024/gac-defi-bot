@@ -3,3 +3,10 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Editor swap / backup files (a nano swap file, .package.json.swp, had been
+# committed — it leaked the author's local username and host)
+*.swp
+*.swo
+*~
+.*.swp

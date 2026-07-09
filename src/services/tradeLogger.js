@@ -19,6 +19,21 @@ export class TradeLoggerService {
     console.log(`❌ Failed: ${entry.reason ?? 'unknown'}`);
   }
 
+  // ── Method-name aliases ───────────────────────────────────────────────
+  // The Orchestrator calls logFailure(reason, meta) and the ExecutorModule
+  // calls logSuccess(trade), but neither existed here — only log()/logFailed().
+  // Every execute/hold path therefore threw "logFailure is not a function"
+  // and aborted the whole cycle. These thin adapters map the callers'
+  // signatures onto the existing implementations.
+
+  async logSuccess(trade) {
+    return this.log(trade);
+  }
+
+  async logFailure(reason, meta = {}) {
+    return this.logFailed({ reason, ...meta });
+  }
+
   async getAll() {
     return (await this.kv.getJSON(KV_KEYS.TRADE_LOG)) || [];
   }
