@@ -26,7 +26,7 @@ id = "f7be98ba51a34e34bf661795ceff55ca"
 # If the deploy later fails with a Node built-in / "nodejs_compat" error from
 # viem, add:  compatibility_flags = ["nodejs_compat"]  to the top of this file.
 
-# NO [triggers]/crons block. src/index.js (RELAY v18.0) is a passive JSON
+# NO [triggers]/crons block. src/index.js is a passive JSON
 # relay — fetch() only (/health, /prices), no scheduled() export. A cron
 # trigger was previously restored here on the mistaken belief it still
 # drove a scheduled Orchestrator handler; index.js had already dropped
