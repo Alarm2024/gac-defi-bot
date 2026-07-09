@@ -279,13 +279,14 @@ ENDPOINT_ENV_KEYS: tuple[str, ...] = (
 # Env vars that name where funds can go / which contracts are used.
 # These are what you MUST verify point at addresses you control.
 FUND_ROUTING_ENV_KEYS: tuple[str, ...] = (
-    "PAYOUT_WALLET",                 # Python sweep destination (cold wallet)
+    "PAYOUT_WALLET",                    # Python sweep destination (cold wallet)
     "PAYOUT_WALLET_ETH",
-    "PAYOUT_RECIPIENT",              # Worker GasPaymaster.payout() recipient
-    "ARBITRAGE_ENGINE_CONTRACT",
+    "PAYOUT_RECIPIENT",                 # Worker GasPaymaster.payout() recipient
+    "FLASH_ARBITRAGE_CONTRACT_ADDRESS", # HF-Space FlashArbitrageV2 (funds withdraw to its owner)
+    "ARBITRAGE_ENGINE_CONTRACT",        # Worker arbitrage engine
     "ARBITRAGE_ENGINE_CONTRACT_BSC",
-    "GAS_PAYMASTER_CONTRACT",
-    "PAYOUT_CHAIN",                  # BSC (default) | ETH
+    "GAS_PAYMASTER_CONTRACT",           # Worker gas paymaster
+    "PAYOUT_CHAIN",                     # BSC (default) | ETH
 )
 
 

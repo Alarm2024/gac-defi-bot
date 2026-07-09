@@ -1,0 +1,32 @@
+name = "garden-angel-production"
+main = "src/index.js"
+compatibility_date = "2026-07-09"
+
+# The Cloudflare Workers Git build runs `npx wrangler versions upload`, which
+# failed with "Missing entry-point to Worker script" because no wrangler config
+# existed in the repo. `main` above is the entry point (the default export in
+# src/index.js with its fetch + scheduled handlers). This file fixes that build.
+
+# Scheduled Orchestrator cycle — drives the src/index.js `scheduled()` handler.
+# Adjust the cadence to taste (this is every 5 minutes).
+[triggers]
+crons = ["*/5 * * * *"]
+
+# KV namespace used everywhere as env.BOT_KV.
+# ⚠️ REQUIRED: replace `id` with YOUR real namespace id before the deploy will
+#    succeed — find it in Cloudflare dashboard → Workers & Pages → KV, or run
+#    `npx wrangler kv namespace list`. A placeholder here will fail validation
+#    (by design — better a clear error than a worker deployed without its KV).
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = "REPLACE_WITH_YOUR_BOT_KV_NAMESPACE_ID"
+
+# NOTE: secrets are NOT declared here — keep them out of source. Set each with
+#   `npx wrangler secret put <NAME>`  (or in the dashboard):
+#   PRIVATE_KEY, ARBITRAGE_ENGINE_CONTRACT, GAS_PAYMASTER_CONTRACT,
+#   PAYOUT_PASSWORD, PAYOUT_RECIPIENT, TELEGRAM_BOT_TOKEN, ORACLE_API_KEY,
+#   ETH_RPC_PRIMARY/SECONDARY, BSC_RPC_PRIMARY/SECONDARY, UNICHAIN_RPC_URL.
+# See .env.example for the full list and guidance.
+#
+# If the deploy later fails with a Node built-in / "nodejs_compat" error from
+# viem, add:  compatibility_flags = ["nodejs_compat"]  to the top of this file.
