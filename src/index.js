@@ -879,8 +879,15 @@ async function handlePayout(services, chatId, password) {
     return { msg: '🔐 Invalid password.' };
   }
 
-  const paymasterAddress = env.GAS_PAYMASTER_CONTRACT;
-  if (!paymasterAddress) return { msg: '⚠️ `GAS_PAYMASTER_CONTRACT` secret not set.' };
+  // ── PAYOUTS ARE HANDLED ONLY FROM THE HUGGING FACE SERVICE ──────────────────
+  // By design, this Worker never broadcasts a fund-moving transaction. The
+  // single authority that moves money is the Hugging Face PayoutManager
+  // (/payout and /sweep there), which sweeps the hot wallet to PAYOUT_WALLET
+  // and logs every sweep to your Telegram log channel. Keeping all on-chain
+  // value movement in one place you control removes a second signing path and
+  // means the Worker's private key can never move your funds. This command is
+  // therefore preview/report-only: it shows the accounting ledger and emits a
+  // report document, but it does NOT sign or send anything.
 
   const trades = await tradeLogger.getAll();
   if (!trades.length) {
@@ -895,25 +902,11 @@ async function handlePayout(services, chatId, password) {
   const adminFee   = gross * (adminPct / 100);
   const finalPayout = gross - loanFees - gasDebt - adminFee;
 
-  console.log('Payout calc:', { gross, loanFees, gasDebt, adminFee, finalPayout });
-
-  if (finalPayout <= 0) {
-    await report.logPayoutAttempt({ status: 'ZERO_PAYOUT', amount: finalPayout }).catch(() => {});
-    return {
-      msg:
-        `💰 *Payout Preview*\n` +
-        `Gross: ${usd(gross)}\n` +
-        `Loan Fees: −${usd(loanFees)}\n` +
-        `Gas Debt: −${usd(gasDebt)}\n` +
-        `Admin (${adminPct}%): −${usd(adminFee)}\n` +
-        `─────────────────\n` +
-        `Final: ${usd(finalPayout)}\n\n` +
-        `⚠️ No payout — ledger empty or net negative.`
-    };
-  }
+  console.log('Payout preview (accounting-only):', { gross, loanFees, gasDebt, adminFee, finalPayout });
 
   const reportData = {
     generated_at: new Date().toISOString(),
+    note: 'ACCOUNTING PREVIEW ONLY — payouts execute from the Hugging Face service, not this Worker.',
     summary: { totalTrades: trades.length, grossProfit: gross, loanFees, gasDebt, adminFee, finalPayout },
     trades: trades.map(t => ({
       ts: t.ts, txHash: t.txHash, chain: t.chainName,
@@ -925,58 +918,26 @@ async function handlePayout(services, chatId, password) {
     await telegram.sendDocument(
       chatId,
       JSON.stringify(reportData, null, 2),
-      `payout_${new Date().toISOString().slice(0, 10)}.json`,
-      `🪬🧿✝️ Payout Report — Final: ${usd(finalPayout)}`
+      `payout_preview_${new Date().toISOString().slice(0, 10)}.json`,
+      `🪬🧿✝️ Payout Preview (report-only) — Net: ${usd(finalPayout)}`
     );
   } catch (e) {
     console.warn('sendDocument warning:', e.message);
   }
 
-  try {
-    const walletClient = await blockchain.getWalletClient('ETH');
-    const recipient    = env.PAYOUT_RECIPIENT ?? walletClient.account.address;
-    const data         = encodeFunctionData({
-      abi: GAS_PAYMASTER_ABI,
-      functionName: 'payout',
-      args: [recipient],
-    });
+  await report.logPayoutAttempt({ status: 'PREVIEW_ONLY', amount: finalPayout }).catch(() => {});
 
-    const publicClient = blockchain.getPublicClient('ETH');
-    const gasEstimate  = await publicClient.estimateGas({
-      to: paymasterAddress, data,
-      account: walletClient.account,
-    });
-
-    const txHash  = await blockchain.sendTransaction('ETH', paymasterAddress, data, gasEstimate * 2n);
-    const receipt = await blockchain.waitForReceipt('ETH', txHash);
-
-    if (receipt.status === 'reverted') {
-      await report.logPayoutAttempt({ status: 'TX_REVERTED', txHash, amount: finalPayout }).catch(() => {});
-      return { msg: `❌ Payout tx reverted.\n\`${txHash}\`` };
-    }
-
-    await kvWrite(env, kv, K.GROSS, 0);
-    await kvWrite(env, kv, K.FEES,  0);
-    await kvWrite(env, kv, K.GAS,   0);
-
-    await report.logPayoutAttempt({
-      status: 'SUCCESS', amount: finalPayout, txHash, recipient,
-      gasUsed: receipt.gasUsed.toString(),
-    }).catch(() => {});
-
-    const explorer = CHAIN_REGISTRY?.ETH?.explorerBase ?? 'https://etherscan.io/tx';
-    return {
-      msg:
-        `💰 *Payout Successful!*\n` +
-        `Amount: ${usd(finalPayout)}\n` +
-        `Recipient: \`${recipient.slice(0, 10)}…\`\n` +
-        `[View on Etherscan](${explorer}/${txHash})`
-    };
-  } catch (err) {
-    console.error('Payout execution error:', err.message);
-    await report.logPayoutAttempt({
-      status: 'EXECUTION_ERROR', amount: finalPayout, error: err.message,
-    }).catch(() => {});
-    return { msg: `❌ Payout failed: ${err.message.slice(0, 160)}` };
-  }
+  return {
+    msg:
+      `💰 *Payout Preview (report-only)*\n` +
+      `Gross: ${usd(gross)}\n` +
+      `Loan Fees: −${usd(loanFees)}\n` +
+      `Gas Debt: −${usd(gasDebt)}\n` +
+      `Admin (${adminPct}%): −${usd(adminFee)}\n` +
+      `─────────────────\n` +
+      `Net: ${usd(finalPayout)}\n\n` +
+      `ℹ️ This Worker does not move funds. Run *\`/payout\`* or *\`/sweep\`* in the ` +
+      `Hugging Face bot — that is the only place a payout/sweep executes, and it ` +
+      `logs every transaction to your Telegram log channel.`
+  };
 }
