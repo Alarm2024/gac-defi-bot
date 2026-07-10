@@ -1,5 +1,35 @@
-// 🪬🧿✝️  PriceService – v17.6
+// 🪬🧿✝️  PriceService – v17.7
 // ─────────────────────────────────────────────────────────────────────────────
+// v17.7 FIX — XRP not mapped, shipped proactively THIS time alongside the
+//   Python side (scanner.py v18.15 / price_client.py v2.16) instead of
+//   after the fact — CAKE's v17.6 fix above only landed once someone
+//   noticed the static-$2.00-guess symptom in production logs, hours
+//   after scanner.py's CAKE pair had already been live and blind to a
+//   real price. Same pattern as v17.6: real token (Binance-Peg XRP,
+//   independently cross-checked against CoinGecko/OKX/Uniswap/OKLink,
+//   not just this Worker's own BscScan lookup — that address showed a
+//   "displayed name does not match contract's Name function" warning,
+//   confirmed as a known cosmetic quirk of BSC's early-2020 Binance-Peg
+//   contract template rather than a red flag). CoinGecko id is "ripple";
+//   Kraken lists XRP too.
+//
+// v17.7 FIXES (review + one correction to that review) — three CAKE
+//   adjustments, in the order they actually happened:
+//   1. COINBASE_ID.CAKE was 'CAKE-USD' — an automated reviewer (Gemini)
+//      claimed Coinbase doesn't list CAKE for trading and this was set
+//      to null on that claim.
+//   2. KRAKEN_PAIR.CAKE was null on the wrong assumption Kraken doesn't
+//      list it — verified it does (kraken.com/prices/pancakeswap,
+//      pro.kraken.com/app/trade/cake-eur) and wired it to 'CAKEUSD'.
+//   3. CORRECTION — a live `wrangler tail` of the deployed Worker (still
+//      running the pre-#1 code) showed "CAKE = $1.38 [coinbase ✓]" —
+//      direct production evidence Coinbase's CAKE-USD DOES work,
+//      contradicting step 1's claim. Reverted back to 'CAKE-USD'.
+//      Lesson: an automated review's confident claim still needs
+//      checking against real evidence, same bar as any other change in
+//      this file — it isn't automatically more trustworthy than a
+//      memory-sourced guess would have been.
+//
 // v17.6 FIX — CAKE not mapped → getPrice('CAKE') throws "Unsupported asset"
 //   immediately (no source is even attempted). Same root cause as v17.4's
 //   WBTC gap and v17.2's WBNB gap below: the Python bot's scanner.py added
@@ -78,6 +108,7 @@ const BINANCE_SYMBOL = {
   BTC:  'BTCUSDT',
   WBTC: 'BTCUSDT', // ✅ FIX v17.4 — WBTC is BTC wrapped/pegged; same Binance price feed
   CAKE: 'CAKEUSDT', // ✅ FIX v17.6 — real, listed Binance pair (not an alias)
+  XRP:  'XRPUSDT',  // ✅ FIX v17.7 — real, listed Binance pair
 };
 
 const COINGECKO_ID = {
@@ -88,6 +119,7 @@ const COINGECKO_ID = {
   BTC:  'bitcoin',
   WBTC: 'bitcoin', // ✅ FIX v17.4
   CAKE: 'pancakeswap-token', // ✅ FIX v17.6 — "cake" is a different, unrelated id
+  XRP:  'ripple', // ✅ FIX v17.7
 };
 
 // Kraken uses slightly different pair names
@@ -98,7 +130,12 @@ const KRAKEN_PAIR = {
   WBNB: null,     // ✅ FIX v17.2 — Kraken doesn't list WBNB either; will skip
   BTC:  'XBTUSD',
   WBTC: 'XBTUSD', // ✅ FIX v17.4
-  CAKE: null,     // ✅ FIX v17.6 — Kraken doesn't list CAKE; will skip cleanly
+  CAKE: 'CAKEUSD', // ✅ FIX v17.7 (review) — v17.6 wrongly assumed Kraken
+                   //   doesn't list CAKE; verified via kraken.com/prices/
+                   //   pancakeswap and pro.kraken.com/app/trade/cake-eur —
+                   //   it's a real, tradable spot pair. Wiring it in only
+                   //   adds another live fallback source, no downside.
+  XRP:  'XRPUSD', // ✅ FIX v17.7 — Kraken does list XRP
 };
 
 // Coinbase product IDs
@@ -109,7 +146,17 @@ const COINBASE_ID = {
   WBNB: 'BNB-USD', // ✅ FIX v17.2
   BTC:  'BTC-USD',
   WBTC: 'BTC-USD', // ✅ FIX v17.4
-  CAKE: 'CAKE-USD', // ✅ FIX v17.6 — real, listed Coinbase product
+  CAKE: 'CAKE-USD', // ✅ FIX v17.7 (correction) — an automated review
+                     //   claimed Coinbase doesn't list CAKE and this was
+                     //   briefly set to null; a live `wrangler tail` of
+                     //   the deployed Worker then showed
+                     //   "CAKE = $1.38 [coinbase ✓]" — direct production
+                     //   evidence the pair works, contradicting that
+                     //   claim. Reverted. Lesson: verify automated review
+                     //   findings against real evidence before trusting
+                     //   confident-sounding claims, same bar as any
+                     //   other change here.
+  XRP:  'XRP-USD',  // ✅ FIX v17.7 — real, listed Coinbase product
 };
 
 const STATIC_FALLBACK = {
@@ -121,6 +168,7 @@ const STATIC_FALLBACK = {
   BTC:  65000,
   WBTC: 65000, // ✅ FIX v17.4 — same static fallback as BTC
   CAKE: 2.00,  // ✅ FIX v17.6 — matches price_client.py's own last-resort value
+  XRP:  1.50,  // ✅ FIX v17.7 — matches price_client.py's own last-resort value
 };
 
 const LIVE_SOURCES = new Set(['binance', 'coingecko', 'kraken', 'coinbase']);
