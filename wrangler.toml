@@ -5,28 +5,37 @@ compatibility_date = "2026-07-09"
 # The Cloudflare Workers Git build runs `npx wrangler versions upload`, which
 # failed with "Missing entry-point to Worker script" because no wrangler config
 # existed in the repo. `main` above is the entry point (the default export in
-# src/index.js with its fetch + scheduled handlers). This file fixes that build.
-
-# Scheduled Orchestrator cycle — drives the src/index.js `scheduled()` handler.
-# Adjust the cadence to taste (this is every 5 minutes).
-[triggers]
-crons = []
+# src/index.js). This file fixes that build.
 
 # KV namespace used everywhere as env.BOT_KV.
-# ⚠️ REQUIRED: replace `id` with YOUR real namespace id before the deploy will
-#    succeed — find it in Cloudflare dashboard → Workers & Pages → KV, or run
-#    `npx wrangler kv namespace list`. A placeholder here will fail validation
-#    (by design — better a clear error than a worker deployed without its KV).
+# ⚠REQUIRED: replace `id` with YOUR real namespace id before the deploy will
+#     succeed — find it in Cloudflare dashboard → Workers & Pages → KV, or run
+#     `npx wrangler kv namespace list`. A placeholder here will fail validation
+#     (by design — better a clear error than a worker deployed without its KV).
 [[kv_namespaces]]
 binding = "BOT_KV"
 id = "f7be98ba51a34e34bf661795ceff55ca"
 
 # NOTE: secrets are NOT declared here — keep them out of source. Set each with
-#   `npx wrangler secret put <NAME>`  (or in the dashboard):
-#   PRIVATE_KEY, ARBITRAGE_ENGINE_CONTRACT, GAS_PAYMASTER_CONTRACT,
-#   PAYOUT_PASSWORD, PAYOUT_RECIPIENT, TELEGRAM_BOT_TOKEN, ORACLE_API_KEY,
-#   ETH_RPC_PRIMARY/SECONDARY, BSC_RPC_PRIMARY/SECONDARY, UNICHAIN_RPC_URL.
+#     `npx wrangler secret put <NAME>`  (or in the dashboard):
+#    PRIVATE_KEY, ARBITRAGE_ENGINE_CONTRACT, GAS_PAYMASTER_CONTRACT,
+#    PAYOUT_PASSWORD, PAYOUT_RECIPIENT, TELEGRAM_BOT_TOKEN, ORACLE_API_KEY,
+#    ETH_RPC_PRIMARY/SECONDARY, BSC_RPC_PRIMARY/SECONDARY, UNICHAIN_RPC_URL.
 # See .env.example for the full list and guidance.
 #
 # If the deploy later fails with a Node built-in / "nodejs_compat" error from
 # viem, add:  compatibility_flags = ["nodejs_compat"]  to the top of this file.
+
+# NO [triggers]/crons block. src/index.js is a passive JSON
+# relay — fetch() only (/health, /prices), no scheduled() export. A cron
+# trigger was previously restored here on the mistaken belief it still
+# drove a scheduled Orchestrator handler; index.js had already dropped
+# that handler by design ("NO cron auto-trader" — real trade execution
+# now happens exclusively from the Hugging Face bot's LocalExecutor, not
+# this Worker). With crons configured but no scheduled() export, Cloudflare
+# fired a ScheduledEvent every 5 minutes straight into an unhandled-event
+# exception — visible via `npx wrangler tail`:
+#   "Handler does not export a scheduled() function"
+# If a Worker-side scheduled task is ever needed again, add a real
+# `scheduled(event, env, ctx)` export to src/index.js FIRST, then restore
+# this block — never the other way around.
