@@ -5,10 +5,7 @@ compatibility_date = "2026-07-09"
 # The Cloudflare Workers Git build runs `npx wrangler versions upload`, which
 # failed with "Missing entry-point to Worker script" because no wrangler config
 # existed in the repo. `main` above is the entry point (the default export in
-# src/index.js with its fetch + scheduled handlers). This file fixes that build.
-
-# Scheduled Orchestrator cycle — drives the src/index.js `scheduled()` handler.
-# Adjust the cadence to taste (this is every 5 minutes).
+# src/index.js). This file fixes that build.
 
 # KV namespace used everywhere as env.BOT_KV.
 # ⚠️ REQUIRED: replace `id` with YOUR real namespace id before the deploy will
@@ -29,5 +26,16 @@ id = "f7be98ba51a34e34bf661795ceff55ca"
 # If the deploy later fails with a Node built-in / "nodejs_compat" error from
 # viem, add:  compatibility_flags = ["nodejs_compat"]  to the top of this file.
 
-[triggers]
-crons = ["*/5 * * * *"]
+# NO [triggers]/crons block. src/index.js is a passive JSON
+# relay — fetch() only (/health, /prices), no scheduled() export. A cron
+# trigger was previously restored here on the mistaken belief it still
+# drove a scheduled Orchestrator handler; index.js had already dropped
+# that handler by design ("NO cron auto-trader" — real trade execution
+# now happens exclusively from the Hugging Face bot's LocalExecutor, not
+# this Worker). With crons configured but no scheduled() export, Cloudflare
+# fired a ScheduledEvent every 5 minutes straight into an unhandled-event
+# exception — visible via `npx wrangler tail`:
+#   "Handler does not export a scheduled() function"
+# If a Worker-side scheduled task is ever needed again, add a real
+# `scheduled(event, env, ctx)` export to src/index.js FIRST, then restore
+# this block — never the other way around.
