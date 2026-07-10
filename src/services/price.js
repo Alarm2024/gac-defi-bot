@@ -1,5 +1,13 @@
-// 🪬🧿✝️  PriceService – v17.3
+// 🪬🧿✝️  PriceService – v17.4
 // ─────────────────────────────────────────────────────────────────────────────
+// v17.4 FIX — WBTC not mapped → getPrice('WBTC') throws "Unsupported asset"
+//   immediately (no source is even attempted). Same root cause and same fix
+//   as v17.2's WBNB gap below: the BSC-side scan pairs use the wrapped/pegged
+//   symbol (WBTC, i.e. BTCB on BSC) while every lookup table here only had
+//   the unwrapped BTC. Mirrors the WETH→ETH / WBNB→BNB aliasing pattern —
+//   WBTC tracks the same USD price as BTC, so it's aliased to BTC's entries
+//   across BINANCE_SYMBOL/COINGECKO_ID/KRAKEN_PAIR/COINBASE_ID/STATIC_FALLBACK.
+//
 // v17.3 FIX — STATIC_FALLBACK had ETH/WETH = 3500, badly stale and mismatched
 //   against price_client.py's own last-resort table (_STATIC_PRICES = 1600).
 //   The mismatch meant the two fallback layers of the same oracle chain could
@@ -36,6 +44,7 @@ const BINANCE_SYMBOL = {
   BNB:  'BNBUSDT',
   WBNB: 'BNBUSDT', // ✅ FIX v17.2 — WBNB is BNB wrapped; same Binance price feed
   BTC:  'BTCUSDT',
+  WBTC: 'BTCUSDT', // ✅ FIX v17.4 — WBTC is BTC wrapped/pegged; same Binance price feed
 };
 
 const COINGECKO_ID = {
@@ -44,6 +53,7 @@ const COINGECKO_ID = {
   BNB:  'binancecoin',
   WBNB: 'binancecoin', // ✅ FIX v17.2
   BTC:  'bitcoin',
+  WBTC: 'bitcoin', // ✅ FIX v17.4
 };
 
 // Kraken uses slightly different pair names
@@ -53,6 +63,7 @@ const KRAKEN_PAIR = {
   BNB:  null,     // Kraken doesn't list BNB
   WBNB: null,     // ✅ FIX v17.2 — Kraken doesn't list WBNB either; will skip
   BTC:  'XBTUSD',
+  WBTC: 'XBTUSD', // ✅ FIX v17.4
 };
 
 // Coinbase product IDs
@@ -62,6 +73,7 @@ const COINBASE_ID = {
   BNB:  'BNB-USD',
   WBNB: 'BNB-USD', // ✅ FIX v17.2
   BTC:  'BTC-USD',
+  WBTC: 'BTC-USD', // ✅ FIX v17.4
 };
 
 const STATIC_FALLBACK = {
@@ -71,6 +83,7 @@ const STATIC_FALLBACK = {
   BNB:  580,
   WBNB: 580,  // ✅ FIX v17.2 — same static fallback as BNB
   BTC:  65000,
+  WBTC: 65000, // ✅ FIX v17.4 — same static fallback as BTC
 };
 
 const LIVE_SOURCES = new Set(['binance', 'coingecko', 'kraken', 'coinbase']);
