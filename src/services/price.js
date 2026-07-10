@@ -1,5 +1,23 @@
-// 🪬🧿✝️  PriceService – v17.5
+// 🪬🧿✝️  PriceService – v17.6
 // ─────────────────────────────────────────────────────────────────────────────
+// v17.6 FIX — CAKE not mapped → getPrice('CAKE') throws "Unsupported asset"
+//   immediately (no source is even attempted). Same root cause as v17.4's
+//   WBTC gap and v17.2's WBNB gap below: the Python bot's scanner.py added
+//   a new BSC scan pair (CAKE/USDT, v18.13) but this Worker's own lookup
+//   tables were never updated to match, so /prices?assets=...CAKE... always
+//   silently dropped CAKE from the response — confirmed in production via
+//   the Python side's own logs: the oracle mirror consistently returned
+//   "3/4 assets" (never CAKE), forcing every scan to fall through OKX/
+//   CoinGecko/Binance (themselves separately rate-limited/geo-blocked) all
+//   the way to a static $2.00 guess. CAKE is a real token (PancakeSwap's
+//   own), not wrapped/pegged to anything already mapped here, so it gets
+//   its own entries rather than an alias — CoinGecko id is
+//   "pancakeswap-token" (NOT "cake", a different, unrelated coingecko id).
+//   Kraken doesn't list CAKE, same treatment as BNB/WBNB above (null,
+//   skipped cleanly). STATIC_FALLBACK ($2.00) matches price_client.py's
+//   own last-resort value on the Python side, same cross-fallback
+//   agreement principle v17.3 already established for ETH/WETH.
+//
 // v17.5 FIX — HTTP 451 (Binance geo-block, permanent for this Worker's IP
 //   range/jurisdiction) was falling into the generic error path, so every
 //   getPrice() call retried it 3x (800ms/1600ms backoff) via withRetry, and
@@ -59,6 +77,7 @@ const BINANCE_SYMBOL = {
   WBNB: 'BNBUSDT', // ✅ FIX v17.2 — WBNB is BNB wrapped; same Binance price feed
   BTC:  'BTCUSDT',
   WBTC: 'BTCUSDT', // ✅ FIX v17.4 — WBTC is BTC wrapped/pegged; same Binance price feed
+  CAKE: 'CAKEUSDT', // ✅ FIX v17.6 — real, listed Binance pair (not an alias)
 };
 
 const COINGECKO_ID = {
@@ -68,6 +87,7 @@ const COINGECKO_ID = {
   WBNB: 'binancecoin', // ✅ FIX v17.2
   BTC:  'bitcoin',
   WBTC: 'bitcoin', // ✅ FIX v17.4
+  CAKE: 'pancakeswap-token', // ✅ FIX v17.6 — "cake" is a different, unrelated id
 };
 
 // Kraken uses slightly different pair names
@@ -78,6 +98,7 @@ const KRAKEN_PAIR = {
   WBNB: null,     // ✅ FIX v17.2 — Kraken doesn't list WBNB either; will skip
   BTC:  'XBTUSD',
   WBTC: 'XBTUSD', // ✅ FIX v17.4
+  CAKE: null,     // ✅ FIX v17.6 — Kraken doesn't list CAKE; will skip cleanly
 };
 
 // Coinbase product IDs
@@ -88,6 +109,7 @@ const COINBASE_ID = {
   WBNB: 'BNB-USD', // ✅ FIX v17.2
   BTC:  'BTC-USD',
   WBTC: 'BTC-USD', // ✅ FIX v17.4
+  CAKE: 'CAKE-USD', // ✅ FIX v17.6 — real, listed Coinbase product
 };
 
 const STATIC_FALLBACK = {
@@ -98,6 +120,7 @@ const STATIC_FALLBACK = {
   WBNB: 580,  // ✅ FIX v17.2 — same static fallback as BNB
   BTC:  65000,
   WBTC: 65000, // ✅ FIX v17.4 — same static fallback as BTC
+  CAKE: 2.00,  // ✅ FIX v17.6 — matches price_client.py's own last-resort value
 };
 
 const LIVE_SOURCES = new Set(['binance', 'coingecko', 'kraken', 'coinbase']);
