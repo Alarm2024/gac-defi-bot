@@ -1,5 +1,27 @@
-// 🪬🧿✝️  PriceService – v17.3
+// 🪬🧿✝️  PriceService – v17.5
 // ─────────────────────────────────────────────────────────────────────────────
+// v17.5 FIX — HTTP 451 (Binance geo-block, permanent for this Worker's IP
+//   range/jurisdiction) was falling into the generic error path, so every
+//   getPrice() call retried it 3x (800ms/1600ms backoff) via withRetry, and
+//   the CircuitBreaker needed 3 of THOSE full retry-cycles (threshold=3)
+//   before finally suspending Binance for 60s — up to 9 real doomed requests
+//   burned per open/close cycle. 451 means "will never succeed from here,"
+//   not "try again shortly" — it now short-circuits exactly like the
+//   existing 429 handling: _fetchJSON tags it isPermanentBlock, withRetry
+//   rethrows immediately with zero extra attempts, and _withSource calls the
+//   new CircuitBreaker.forceOpen() to suspend Binance for 30 minutes instead
+//   of the normal 60s transient-failure window. Directly cuts /prices
+//   latency on every cycle this fires, since that wasted time was inline in
+//   the same request price_client.py's Oracle tier was waiting on.
+//
+// v17.4 FIX — WBTC not mapped → getPrice('WBTC') throws "Unsupported asset"
+//   immediately (no source is even attempted). Same root cause and same fix
+//   as v17.2's WBNB gap below: the BSC-side scan pairs use the wrapped/pegged
+//   symbol (WBTC, i.e. BTCB on BSC) while every lookup table here only had
+//   the unwrapped BTC. Mirrors the WETH→ETH / WBNB→BNB aliasing pattern —
+//   WBTC tracks the same USD price as BTC, so it's aliased to BTC's entries
+//   across BINANCE_SYMBOL/COINGECKO_ID/KRAKEN_PAIR/COINBASE_ID/STATIC_FALLBACK.
+//
 // v17.3 FIX — STATIC_FALLBACK had ETH/WETH = 3500, badly stale and mismatched
 //   against price_client.py's own last-resort table (_STATIC_PRICES = 1600).
 //   The mismatch meant the two fallback layers of the same oracle chain could
@@ -36,6 +58,7 @@ const BINANCE_SYMBOL = {
   BNB:  'BNBUSDT',
   WBNB: 'BNBUSDT', // ✅ FIX v17.2 — WBNB is BNB wrapped; same Binance price feed
   BTC:  'BTCUSDT',
+  WBTC: 'BTCUSDT', // ✅ FIX v17.4 — WBTC is BTC wrapped/pegged; same Binance price feed
 };
 
 const COINGECKO_ID = {
@@ -44,6 +67,7 @@ const COINGECKO_ID = {
   BNB:  'binancecoin',
   WBNB: 'binancecoin', // ✅ FIX v17.2
   BTC:  'bitcoin',
+  WBTC: 'bitcoin', // ✅ FIX v17.4
 };
 
 // Kraken uses slightly different pair names
@@ -53,6 +77,7 @@ const KRAKEN_PAIR = {
   BNB:  null,     // Kraken doesn't list BNB
   WBNB: null,     // ✅ FIX v17.2 — Kraken doesn't list WBNB either; will skip
   BTC:  'XBTUSD',
+  WBTC: 'XBTUSD', // ✅ FIX v17.4
 };
 
 // Coinbase product IDs
@@ -62,6 +87,7 @@ const COINBASE_ID = {
   BNB:  'BNB-USD',
   WBNB: 'BNB-USD', // ✅ FIX v17.2
   BTC:  'BTC-USD',
+  WBTC: 'BTC-USD', // ✅ FIX v17.4
 };
 
 const STATIC_FALLBACK = {
@@ -71,9 +97,16 @@ const STATIC_FALLBACK = {
   BNB:  580,
   WBNB: 580,  // ✅ FIX v17.2 — same static fallback as BNB
   BTC:  65000,
+  WBTC: 65000, // ✅ FIX v17.4 — same static fallback as BTC
 };
 
 const LIVE_SOURCES = new Set(['binance', 'coingecko', 'kraken', 'coinbase']);
+
+// How long to suspend a source after a DEFINITIVE, non-retryable failure
+// (e.g. HTTP 451 geo-block) — much longer than the 60-90s window used for
+// ordinary transient failures, since a jurisdiction/IP-range block won't
+// clear itself on that timescale from the same Cloudflare edge location.
+const PERMANENT_BLOCK_RESET_MS = 30 * 60_000; // 30 min
 
 // ── CircuitBreaker ────────────────────────────────────────────────────────────
 
@@ -83,19 +116,26 @@ class CircuitBreaker {
     this._resetMs   = resetMs;
     this._failures  = 0;
     this._openedAt  = null;
+    this._resetOverrideMs = null; // v17.5 — per-open override for forceOpen()
   }
 
   get isOpen() {
     if (this._openedAt === null) return false;
-    if (Date.now() - this._openedAt >= this._resetMs) {
+    const resetMs = this._resetOverrideMs ?? this._resetMs;
+    if (Date.now() - this._openedAt >= resetMs) {
       this._failures = 0;
       this._openedAt = null;
+      this._resetOverrideMs = null;
       return false;
     }
     return true;
   }
 
-  recordSuccess() { this._failures = 0; this._openedAt = null; }
+  recordSuccess() {
+    this._failures = 0;
+    this._openedAt = null;
+    this._resetOverrideMs = null;
+  }
 
   recordFailure() {
     this._failures += 1;
@@ -108,14 +148,29 @@ class CircuitBreaker {
     }
   }
 
+  // v17.5 — NEW: for definitive, non-retryable failures (e.g. HTTP 451)
+  // where the normal failure-streak threshold would waste several more
+  // doomed requests before finally opening. Opens immediately, with its
+  // own (typically much longer) reset window.
+  forceOpen(resetMs) {
+    this._failures = this._threshold;
+    this._openedAt = Date.now();
+    this._resetOverrideMs = resetMs;
+    console.warn(
+      `[CircuitBreaker] FORCE-OPEN — suspended for ${resetMs / 1000}s ` +
+      `(non-retryable failure, e.g. geo-block)`
+    );
+  }
+
   get health() {
+    const resetMs = this._resetOverrideMs ?? this._resetMs;
     return {
       open      : this.isOpen,
       failures  : this._failures,
       threshold : this._threshold,
       openedAt  : this._openedAt,
       resetsInMs: this._openedAt
-        ? Math.max(0, this._resetMs - (Date.now() - this._openedAt))
+        ? Math.max(0, resetMs - (Date.now() - this._openedAt))
         : null,
     };
   }
@@ -134,7 +189,11 @@ async function withRetry(fn, { attempts = 2, baseDelayMs = 400 } = {}, timeLeftF
       return await fn();
     } catch (e) {
       lastErr = e;
-      if (e.isRateLimit) throw e;
+      // v17.5 — a permanent block (451) is exactly like a rate-limit signal
+      // in that retrying it here is pointless; skip straight to the caller
+      // so _withSource can force-open the circuit instead of burning
+      // `attempts` doomed requests first.
+      if (e.isRateLimit || e.isPermanentBlock) throw e;
       if (i < attempts - 1) {
         let delay = baseDelayMs * 2 ** i;
         if (timeLeftFn) {
@@ -191,6 +250,16 @@ export class PriceService {
         throw err;
       }
 
+      // v17.5 — HTTP 451 = "Unavailable For Legal Reasons," i.e. a
+      // jurisdiction/IP-range block. This will not resolve on a retry
+      // timescale (seconds) — flag it so withRetry/_withSource skip
+      // straight to a long suspension instead of burning attempts.
+      if (res.status === 451) {
+        const err = new Error(`HTTP 451 (geo-blocked) at ${url}`);
+        err.isPermanentBlock = true;
+        throw err;
+      }
+
       if (!res.ok) throw new Error(`HTTP ${res.status} at ${url}`);
       return await res.json();
     } catch (e) {
@@ -242,7 +311,14 @@ export class PriceService {
       cb.recordSuccess();
       return result;
     } catch (e) {
-      cb.recordFailure();
+      // v17.5 — a permanent block skips the normal 3-strikes streak
+      // entirely and force-opens with a much longer window; everything
+      // else keeps the original transient-failure behavior.
+      if (e.isPermanentBlock) {
+        cb.forceOpen(PERMANENT_BLOCK_RESET_MS);
+      } else {
+        cb.recordFailure();
+      }
       throw e;
     }
   }
