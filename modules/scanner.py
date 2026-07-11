@@ -1,6 +1,45 @@
 """
-modules/scanner.py — Garden Angel On-Demand Market Scanner v18.28
+modules/scanner.py — Garden Angel On-Demand Market Scanner v18.29
 ──────────────────────────────────────────────────────────────────────────────
+v18.29 — vs v18.28 (same-day follow-up, from the first production log
+after v18.28 went live, 2026-07-11 15:33):
+
+  FIX (the surviving "UNVERIFIED — Watching" alert) — v18.28's
+    _verify_pairs_onchain deliberately KEPT rows whose live read failed
+    (no pairAddress, or getReserves() reverted), reasoning v18.21's
+    guard would hold them safely. It does — but "safely held" still
+    means the row can win best-of-cycle and fire the near-miss alert,
+    which is exactly the noise loop this work exists to end. First
+    post-deploy log proved it: WBTC/USDT "biswap" — DexScreener's
+    USDT-quoted biswap row points at a pool getReserves() cannot read
+    (V3-style; the readable V2 biswap pool was 58 min stale that same
+    cycle), so the row could never verify AND could never execute
+    (LocalExecutor routes V2 only), yet produced "Spread 0.281% | net
+    $2.77 … no live two-leg quote confirmed it" anyway. A venue whose
+    reserves can't be read through the same interface execution uses is
+    not a tradeable venue — unverifiable rows are now DROPPED, not
+    kept. RPC-outage cycles lose nothing: the live-reserve path has
+    already failed in that scenario, so the pair lands on the same
+    "insufficient data" HOLD either way.
+
+  FIX (cosmetic but misleading — "best spread 0.000% net $0.00") — an
+    "insufficient data" ScanResult carries never-computed zeros for
+    spread/net. With v18.28 correctly dropping phantom candidates,
+    cycles appeared where every REAL candidate netted negative — and
+    the $0.00 blanks outranked them in the highest-net fallback pick,
+    so the scan summary/pulse/dashboard reported a meaningless
+    0.000%/$0.00 instead of the true best (a real negative near-miss
+    number worth watching). The fallback pick now prefers
+    data_quality=="real" results whenever any exist.
+
+  Interpretation note for the operator: after these two fixes, the
+    numbers the bot reports are REAL — a quiet cycle now honestly reads
+    "best net $-X" instead of a phantom "+$4.24 (unverified)". When a
+    genuinely executable spread clears the floor, it BUYs the same
+    cycle (v18.26/v18.28 machinery). The old always-positive
+    "opportunities" were pricing artifacts of dead/unreadable pools —
+    they were never capturable by anyone, no matter how fast.
+
 v18.28 — vs v18.27:
 
   FIX (root cause — the standing "UNVERIFIED — clears the floor on the
@@ -1802,7 +1841,21 @@ class Scanner:
                     " — picking from executable pool" if executable else
                     " — none executable, falling back to highest-net (may be unverified)",
                 )
-                best = max(executable or clean_results, key=lambda r: r.net_after_fee)
+                # v18.29 — never let a blank "insufficient data" result
+                # (spread 0, net $0.00 — fields never computed) outrank a
+                # genuinely-computed candidate in the fallback pick.
+                # Production (2026-07-11 15:33): every real candidate that
+                # cycle netted negative, so the $0.00 blanks won max() and
+                # the summary line reported "best spread 0.000% net $0.00"
+                # — hiding the actual best (a real, negative near-miss
+                # number worth seeing) from the log, the hourly pulse, and
+                # the dashboard. Real results are preferred whenever any
+                # exist; a cycle where literally everything was
+                # insufficient falls back unchanged.
+                pickable = [
+                    r for r in clean_results if r.data_quality == "real"
+                ] or clean_results
+                best = max(executable or pickable, key=lambda r: r.net_after_fee)
                 result.signal              = best.signal
                 result.has_opportunity     = best.has_opportunity
                 result.chain               = best.chain
@@ -3040,9 +3093,22 @@ class Scanner:
           • stale read  → the row is DROPPED, killing the frozen-ratio
             phantom spread at the source instead of re-alerting on it
             every cycle.
-          • failed read / no pairAddress → the row is kept as-is; it
-            simply stays unverified and v18.21's guard keeps it away
-            from execution, exactly as before this version.
+          • failed read / no pairAddress → the row is DROPPED (v18.29 —
+            was "kept as unverified" in v18.28). Production proved the
+            kept-row variant immediately regenerates the exact
+            "UNVERIFIED — Watching" loop this method exists to end:
+            2026-07-11 15:34, WBTC/USDT "biswap" — DexScreener's row
+            points at a pool getReserves() can't read (a V3-style pool;
+            the V2 biswap pool was 58 min stale that same cycle), so the
+            row could NEVER verify and could NEVER execute
+            (LocalExecutor routes V2 only), yet it alerted anyway. A
+            venue whose reserves can't be read through the same
+            interface execution uses is not a venue this bot can trade —
+            keeping it as a candidate only manufactures phantom
+            near-misses. If the RPC itself is down, the live-reserve
+            path has already failed too, so the cycle correctly lands on
+            "insufficient data" HOLD either way — nothing real is lost
+            by dropping.
         """
         base_decimals   = cfg.get("base_decimals", 18)
         stable_decimals = cfg.get("stable_decimals", 18)
@@ -3064,7 +3130,6 @@ class Scanner:
 
             if not p.pair_address:
                 unverifiable.append(p.dex_id)
-                kept.append(p)
                 continue
 
             reserve_result = await self._read_live_reserves(
@@ -3072,7 +3137,6 @@ class Scanner:
             )
             if reserve_result is None:
                 unverifiable.append(p.dex_id)
-                kept.append(p)
                 continue
 
             (price_usd, liquidity_usd, base_reserve_raw,
@@ -3099,8 +3163,8 @@ class Scanner:
                 (f"upgraded to live reserves: {', '.join(upgraded)}"
                  if upgraded else "no upgrades needed"),
                 f" | DROPPED stale: {', '.join(dropped)}" if dropped else "",
-                (f" | still unverified (no addr/RPC failed): {', '.join(unverifiable)}"
-                 if unverifiable else ""),
+                (f" | DROPPED unverifiable (no addr/unreadable pool): "
+                 f"{', '.join(unverifiable)}" if unverifiable else ""),
             )
         return kept
 

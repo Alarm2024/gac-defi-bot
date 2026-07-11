@@ -153,22 +153,24 @@ class VerifyPairsTests(unittest.TestCase):
         out = self._run(s._verify_pairs_onchain(CFG, w3, rows))
         self.assertEqual(out, [])
 
-    def test_keep_unverifiable_row(self):
+    def test_drop_unverifiable_row(self):
+        # v18.29 — a row with no pool address can never verify or execute;
+        # it is dropped instead of feeding phantom near-miss alerts.
         w3 = FakeW3({})
         s = full_scanner(w3)
         rows = [DexPairInfo("mdex", 500.0, 900_000.0, 0.0)]  # no pair_address
         out = self._run(s._verify_pairs_onchain(CFG, w3, rows))
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].base_reserve_raw, 0)
+        self.assertEqual(out, [])
 
-    def test_rpc_failure_keeps_row_unverified(self):
+    def test_rpc_failure_drops_row(self):
+        # v18.29 — unreadable pool (V3-style / reverting getReserves) is
+        # dropped; production 2026-07-11 15:34 WBTC/USDT "biswap" case.
         pool = "0x" + "b3" * 20
         w3 = FakeW3({pool: (RuntimeError("rpc down"), BASE)})
         s = full_scanner(w3)
         rows = [DexPairInfo("biswap", 500.0, 900_000.0, 0.0, pair_address=pool)]
         out = self._run(s._verify_pairs_onchain(CFG, w3, rows))
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0].base_reserve_raw, 0)
+        self.assertEqual(out, [])
 
     def test_stale_gate_now_covers_raw_reserve_rows(self):
         now = int(time.time())
