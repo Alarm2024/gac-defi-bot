@@ -124,7 +124,7 @@ def full_scanner(w3):
 
 class VerifyPairsTests(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_upgrade_fresh_dexscreener_row(self):
         now = int(time.time())
@@ -185,7 +185,7 @@ class VerifyPairsTests(unittest.TestCase):
 
 class FetchDexPairsFilterTests(unittest.TestCase):
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_wrong_quote_rows_dropped_and_deduped(self):
         s = full_scanner(None)
@@ -252,5 +252,4 @@ class EndToEndProfitTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    asyncio.set_event_loop(asyncio.new_event_loop())
     unittest.main(verbosity=2)
