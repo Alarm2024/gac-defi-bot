@@ -710,7 +710,9 @@ export class PriceService {
         );
         let warmed = 0;
         for (const [key, id] of Object.entries(idByKey)) {
-          const p = parseFloat(data[id]?.usd);
+          // Optional-chain `data` itself: a malformed/null batch response
+          // must skip cleanly, not throw a TypeError that aborts the warm-up.
+          const p = parseFloat(data?.[id]?.usd);
           if (p && isFinite(p)) {
             this._cache.set(key, { value: p, ts: Date.now(), source: 'coingecko' });
             warmed++;
@@ -750,6 +752,7 @@ export class PriceService {
 
   getCircuitHealth() {
     return {
+      okx      : this._cb.okx.health,   // v18.0 — primary source; must appear in diagnostics
       binance  : this._cb.binance.health,
       coingecko: this._cb.coingecko.health,
       kraken   : this._cb.kraken.health,
