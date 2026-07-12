@@ -109,6 +109,25 @@ const BINANCE_SYMBOL = {
   WBTC: 'BTCUSDT', // ✅ FIX v17.4 — WBTC is BTC wrapped/pegged; same Binance price feed
   CAKE: 'CAKEUSDT', // ✅ FIX v17.6 — real, listed Binance pair (not an alias)
   XRP:  'XRPUSDT',  // ✅ FIX v17.7 — real, listed Binance pair
+  MATIC:'MATICUSDT', // v18.0 — real, listed Binance pair (still 451-blocked from this Worker's IP, same as every symbol here; kept for completeness + the OKX/Coinbase/Kraken fallbacks below actually serve it)
+};
+
+// v18.0 — OKX instrument ids ({BASE}-USDT). NEW primary source: OKX's public
+// REST API is NOT geo-blocked from this Worker's Cloudflare edge (Binance is,
+// permanently — HTTP 451) and is not as aggressively rate-limited as
+// CoinGecko's free tier (HTTP 429). Mirrors the Python side's _OKX_BASE
+// (price_client.py v2.18) — only symbols confirmed listed on OKX spot.
+const OKX_INST = {
+  ETH:  'ETH-USDT',  WETH: 'ETH-USDT',
+  BNB:  'BNB-USDT',  WBNB: 'BNB-USDT',
+  BTC:  'BTC-USDT',  WBTC: 'BTC-USDT',
+  CAKE: 'CAKE-USDT',
+  XRP:  'XRP-USDT',
+  GMT:  'GMT-USDT',
+  FLOKI:'FLOKI-USDT',
+  WOO:  'WOO-USDT',
+  SOLV: 'SOLV-USDT',
+  MATIC:'MATIC-USDT',
 };
 
 const COINGECKO_ID = {
@@ -120,6 +139,27 @@ const COINGECKO_ID = {
   WBTC: 'bitcoin', // ✅ FIX v17.4
   CAKE: 'pancakeswap-token', // ✅ FIX v17.6 — "cake" is a different, unrelated id
   XRP:  'ripple', // ✅ FIX v17.7
+  // v18.0 — operator token expansion (2026-07-12). These IDs are mirrored
+  //   verbatim from the Python side's already-in-production _CG_IDS
+  //   (price_client.py v2.18) so the two halves of the same oracle can
+  //   never disagree on which CoinGecko id a symbol maps to. Without these,
+  //   getPrice() threw "Unsupported asset" for every one of them (see the
+  //   gate fix in getPrice below) and the scanner ran BLIND on these pairs.
+  //   SYRUP has no CoinGecko id — the scanner prices it from its own live
+  //   pool, so it is intentionally absent here (not an oversight).
+  GMT:    'stepn',
+  SYN:    'synapse-2',
+  BIFI:   'beefy-finance',
+  TWT:    'trust-wallet-token',
+  ALPACA: 'alpaca-finance',
+  DEGO:   'dego-finance',
+  LINA:   'linear',
+  FLOKI:  'floki',
+  BANANA: 'apeswap-finance',
+  MATIC:  'matic-network',
+  WOO:    'woo-network',
+  SOLV:   'solv-protocol',
+  LIT:    'litentry',
 };
 
 // Kraken uses slightly different pair names
@@ -136,6 +176,7 @@ const KRAKEN_PAIR = {
                    //   it's a real, tradable spot pair. Wiring it in only
                    //   adds another live fallback source, no downside.
   XRP:  'XRPUSD', // ✅ FIX v17.7 — Kraken does list XRP
+  MATIC:'MATICUSD', // v18.0 — Kraken lists MATIC (Polygon)
 };
 
 // Coinbase product IDs
@@ -157,6 +198,8 @@ const COINBASE_ID = {
                      //   confident-sounding claims, same bar as any
                      //   other change here.
   XRP:  'XRP-USD',  // ✅ FIX v17.7 — real, listed Coinbase product
+  MATIC:'MATIC-USD', // v18.0 — real, listed Coinbase product
+  WOO:  'WOO-USD',   // v18.0 — real, listed Coinbase product
 };
 
 const STATIC_FALLBACK = {
@@ -169,9 +212,19 @@ const STATIC_FALLBACK = {
   WBTC: 65000, // ✅ FIX v17.4 — same static fallback as BTC
   CAKE: 2.00,  // ✅ FIX v17.6 — matches price_client.py's own last-resort value
   XRP:  1.50,  // ✅ FIX v17.7 — matches price_client.py's own last-resort value
+  MATIC:0.50,  // v18.0 — rough last-resort only
+  // NOTE — the other v18.0 alt tokens (GMT/SYN/BIFI/TWT/ALPACA/DEGO/LINA/
+  //   FLOKI/BANANA/WOO/SOLV/LIT) deliberately have NO static fallback: a
+  //   fabricated static price on a thin alt is worse than an honest miss,
+  //   because it can feed a bad spread/profit calc. When every live source
+  //   fails for one of these, getPrice() returns "failed" and the scanner
+  //   falls back to its own live pool-implied price instead.
 };
 
-const LIVE_SOURCES = new Set(['binance', 'coingecko', 'kraken', 'coinbase']);
+// v18.0 — OKX added as a live source (unblocked from this Worker, unlike
+// Binance's permanent 451). Order here doesn't imply priority; the waterfall
+// in getPrice does.
+const LIVE_SOURCES = new Set(['okx', 'binance', 'coingecko', 'kraken', 'coinbase']);
 
 // How long to suspend a source after a DEFINITIVE, non-retryable failure
 // (e.g. HTTP 451 geo-block) — much longer than the 60-90s window used for
@@ -291,6 +344,7 @@ export class PriceService {
     this._timeout = timeoutMs;
 
     this._cb = {
+      okx      : new CircuitBreaker({ threshold: 3, resetMs: 60_000 }), // v18.0
       binance  : new CircuitBreaker({ threshold: 3, resetMs: 60_000 }),
       coingecko: new CircuitBreaker({ threshold: 3, resetMs: 90_000 }),
       kraken   : new CircuitBreaker({ threshold: 3, resetMs: 60_000 }),
@@ -394,6 +448,23 @@ export class PriceService {
     }
   }
 
+  // ── Source 0: OKX (v18.0 — primary; unblocked from this Worker) ────────────
+
+  async _okx(instId, timeLeftFn) {
+    return this._withSource('okx', async () => {
+      const perCallTimeout = timeLeftFn ? Math.min(this._timeout, timeLeftFn()) : this._timeout;
+      const data = await this._fetchJSON(
+        `https://www.okx.com/api/v5/market/ticker?instId=${instId}`,
+        perCallTimeout
+      );
+      // OKX envelope: { code: "0", data: [ { last: "1234.5", ... } ] }
+      if (data.code !== '0') throw new Error(`OKX error code ${data.code} for ${instId}: ${data.msg ?? ''}`);
+      const p = parseFloat(data.data?.[0]?.last);
+      if (!p || !isFinite(p)) throw new Error(`OKX bad price for ${instId}: ${JSON.stringify(data.data?.[0])}`);
+      return p;
+    }, timeLeftFn);
+  }
+
   // ── Source 1: Binance ─────────────────────────────────────────────────────
 
   async _binance(symbol, timeLeftFn) {
@@ -460,12 +531,22 @@ export class PriceService {
 
   async getPrice(asset) {
     const key      = (asset ?? '').toUpperCase();
+    const okxInst  = OKX_INST[key];        // v18.0
     const symbol   = BINANCE_SYMBOL[key];
     const cgId     = COINGECKO_ID[key];
     const krakenPr = KRAKEN_PAIR[key];
     const cbId     = COINBASE_ID[key];
 
-    if (!symbol) throw new Error(`[PriceService] Unsupported asset: "${asset}"`);
+    // v18.0 FIX — was `if (!symbol) throw` which rejected every asset that
+    // lacked a *Binance* symbol, i.e. all the new alt tokens (GMT, ALPACA,
+    // DEGO, TWT, SYN, BIFI, LINA, FLOKI, BANANA, WOO, SOLV, LIT). That was
+    // THE root cause of the "Unsupported asset" storm in production — the
+    // asset was priceable via OKX/CoinGecko, but this early gate threw
+    // before any source was even tried. Now we reject only when NO source
+    // maps the asset at all.
+    if (!okxInst && !symbol && !cgId && !krakenPr && !cbId) {
+      throw new Error(`[PriceService] Unsupported asset: "${asset}"`);
+    }
 
     const hit = this._cache.get(key);
     if (hit && Date.now() - hit.ts < this._ttl) return hit.value;
@@ -486,8 +567,23 @@ export class PriceService {
 
     let value, source;
 
-    // 1. Binance
-    if (timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
+    // 0. OKX — v18.0 primary. Unblocked from this Worker (Binance is 451),
+    //    lighter rate limits than CoinGecko, and covers the majors + several
+    //    of the new alts. Tried FIRST so the common case never even touches
+    //    the geo-blocked / rate-limited sources below.
+    if (okxInst && timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
+      try {
+        value  = await this._okx(okxInst, timeLeft);
+        source = 'okx';
+        console.info(`[PriceService] ${key} = $${value.toFixed(2)} [okx ✓]`);
+      } catch (e) {
+        console.warn(`[PriceService] OKX failed for ${key}: ${e.message}`);
+      }
+    }
+
+    // 1. Binance — kept for completeness but expected to 451 from this
+    //    Worker's IP range; only runs if OKX didn't already resolve.
+    if (value === undefined && symbol && timeLeft() >= MIN_BUDGET_FOR_SOURCE_MS) {
       try {
         value  = await this._binance(symbol, timeLeft);
         source = 'binance';
@@ -495,8 +591,6 @@ export class PriceService {
       } catch (e) {
         console.warn(`[PriceService] Binance failed for ${key}: ${e.message}`);
       }
-    } else {
-      console.warn(`[PriceService] Skipping binance for ${key}: budget depleted (${timeLeft()}ms left)`);
     }
 
     // 2. CoinGecko
@@ -583,8 +677,59 @@ export class PriceService {
 
   // ── Parallel batch fetch ──────────────────────────────────────────────────
 
+  // v18.0 — batched CoinGecko warm-up. CoinGecko's free tier rate-limits
+  // hard (HTTP 429), and the old getMultiPrice fired ONE CoinGecko request
+  // PER asset — a 15-asset scan every few seconds = a 429 storm that
+  // knocked the source out for 90s+ and forced static fallbacks. CoinGecko's
+  // simple/price endpoint accepts a comma-separated id list, so one request
+  // prices them all. We warm the cache here (source 'coingecko'); getPrice()
+  // then returns those as cache hits without re-fetching. Best-effort: any
+  // failure (429/timeout) is swallowed and the normal per-asset waterfall
+  // (OKX-first) still runs for whatever isn't warmed.
+  async _warmCoinGeckoBatch(assets, timeLeftFn) {
+    const wanted = [];
+    const idByKey = {};
+    for (const a of assets) {
+      const key = (a ?? '').toUpperCase();
+      const id  = COINGECKO_ID[key];
+      if (!id) continue;
+      const hit = this._cache.get(key);
+      if (hit && Date.now() - hit.ts < this._ttl) continue; // already fresh
+      idByKey[key] = id;
+      wanted.push(id);
+    }
+    if (!wanted.length) return;
+    if (this._cb.coingecko.isOpen) return; // circuit already open — don't bother
+    const ids = [...new Set(wanted)].join(',');
+    try {
+      await this._withSource('coingecko', async () => {
+        const perCallTimeout = timeLeftFn ? Math.min(this._timeout, timeLeftFn()) : this._timeout;
+        const data = await this._fetchJSON(
+          `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&precision=6`,
+          perCallTimeout
+        );
+        let warmed = 0;
+        for (const [key, id] of Object.entries(idByKey)) {
+          const p = parseFloat(data[id]?.usd);
+          if (p && isFinite(p)) {
+            this._cache.set(key, { value: p, ts: Date.now(), source: 'coingecko' });
+            warmed++;
+          }
+        }
+        console.info(`[PriceService] CoinGecko batch warmed ${warmed}/${Object.keys(idByKey).length} assets in 1 request`);
+        return warmed;
+      }, timeLeftFn);
+    } catch (e) {
+      console.warn(`[PriceService] CoinGecko batch warm-up skipped: ${e.message}`);
+    }
+  }
+
   async getMultiPrice(assets = ['ETH', 'BNB', 'WETH', 'WBNB']) {
     const results = {};
+    // v18.0 — one batched CoinGecko call up front instead of N separate ones.
+    const BATCH_BUDGET_MS = 4_000;
+    const batchDeadline = Date.now() + BATCH_BUDGET_MS;
+    await this._warmCoinGeckoBatch(assets, () => batchDeadline - Date.now());
     await Promise.allSettled(
       assets.map(async (a) => {
         const key = a.toUpperCase();
