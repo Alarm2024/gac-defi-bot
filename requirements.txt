@@ -1,3 +1,9 @@
 python-dotenv==1.0.1
-web3==6.15.0
-eth-account==0.10.0
+# web3 7.15.0 requires eth-account>=0.13.6 — the old eth-account==0.10.0 pin
+# made the dependency set unresolvable and broke the Cloudflare Workers build
+# (`pip install -r requirements.txt` -> ResolutionImpossible). This repo's
+# Python never imports web3/eth-account (the deployed Worker is pure JS via
+# `wrangler deploy`), so this only needs to resolve; the pin is aligned, not
+# functionally load-bearing here.
+web3==7.15.0
+eth-account>=0.13.6
