@@ -40,13 +40,17 @@ function jsonResponse(obj, status = 200, extraHeaders = {}) {
 // Constant-time string comparison for the RELAY_AUTH_TOKEN bearer check —
 // a plain `!==` returns as soon as it finds the first differing character,
 // which leaks (via response timing) how many leading characters a guess got
-// right. Always walks the full length of the longer string regardless of
-// where/whether a mismatch occurs.
+// right. Length is checked up front (rather than folded into the loop) so a
+// caller sending a huge Authorization header can't force the XOR loop to run
+// proportional to their input size — worst case here is bounded by the
+// token's own (short, fixed) length, not an attacker-controlled one.
+// Leaking whether the length matches isn't a practical risk for a
+// high-entropy secret token.
 function _timingSafeEqual(a, b) {
-  const len = Math.max(a.length, b.length);
-  let mismatch = a.length === b.length ? 0 : 1;
-  for (let i = 0; i < len; i++) {
-    mismatch |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return mismatch === 0;
 }
@@ -133,10 +137,15 @@ export default {
           // buffering it into memory first — sendDocument can carry a real
           // file, and arrayBuffer()/text() would hold the whole thing in
           // Worker memory for no benefit. duplex: 'half' is required by the
-          // fetch spec whenever the body is a ReadableStream.
+          // fetch spec whenever the body is a ReadableStream — only set it
+          // (and body) when there IS a stream; a bodyless POST (e.g.
+          // Content-Length: 0) has request.body === null, and some fetch
+          // implementations are picky about pairing a null body with duplex.
           init.headers = { 'Content-Type': request.headers.get('Content-Type') || 'application/json' };
-          init.body = request.body;
-          init.duplex = 'half';
+          if (request.body) {
+            init.body = request.body;
+            init.duplex = 'half';
+          }
         }
         const upstream = await fetch(upstreamUrl, init);
         const responseHeaders = {
