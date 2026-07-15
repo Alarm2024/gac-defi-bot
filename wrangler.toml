@@ -17,11 +17,17 @@ binding = "BOT_KV"
 id = "f7be98ba51a34e34bf661795ceff55ca"
 
 # NOTE: secrets are NOT declared here — keep them out of source. Set each with
-#     `npx wrangler secret put <NAME>`  (or in the dashboard):
-#    PRIVATE_KEY, ARBITRAGE_ENGINE_CONTRACT, GAS_PAYMASTER_CONTRACT,
-#    PAYOUT_PASSWORD, PAYOUT_RECIPIENT, TELEGRAM_BOT_TOKEN, ORACLE_API_KEY,
-#    ETH_RPC_PRIMARY/SECONDARY, BSC_RPC_PRIMARY/SECONDARY, UNICHAIN_RPC_URL.
-# See .env.example for the full list and guidance.
+#     `npx wrangler secret put <NAME>`  (or in the dashboard). The current
+#     src/index.js (v18.1, "keyless" relay) only ever reads:
+#    ORACLE_API_KEY    — optional; gates /prices with X-API-Key if set.
+#    RELAY_AUTH_TOKEN  — required for /bot<token>/<method> (Telegram relay);
+#                        must match the RELAY_AUTH_TOKEN the Python bot already
+#                        sends as `Authorization: Bearer <token>` to every proxy
+#                        route (see Garden-Angel-Terminal's telegram_client.py).
+#     Everything else in .env.example (PRIVATE_KEY, ARBITRAGE_ENGINE_CONTRACT,
+#     GAS_PAYMASTER_CONTRACT, PAYOUT_PASSWORD, PAYOUT_RECIPIENT,
+#     TELEGRAM_BOT_TOKEN, RPC vars) is leftover from the pre-v18.0 Worker and
+#     is not read by this file — see .env.example's own note.
 #
 # If the deploy later fails with a Node built-in / "nodejs_compat" error from
 # viem, add:  compatibility_flags = ["nodejs_compat"]  to the top of this file.
