@@ -37,6 +37,20 @@ function jsonResponse(obj, status = 200, extraHeaders = {}) {
   });
 }
 
+// Constant-time string comparison for the RELAY_AUTH_TOKEN bearer check —
+// a plain `!==` returns as soon as it finds the first differing character,
+// which leaks (via response timing) how many leading characters a guess got
+// right. Always walks the full length of the longer string regardless of
+// where/whether a mismatch occurs.
+function _timingSafeEqual(a, b) {
+  const len = Math.max(a.length, b.length);
+  let mismatch = a.length === b.length ? 0 : 1;
+  for (let i = 0; i < len; i++) {
+    mismatch |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return mismatch === 0;
+}
+
 export default {
 
   async fetch(request, env, ctx) {
@@ -95,14 +109,17 @@ export default {
     // Telegram directly, so this stays "keyless" from the Worker's own
     // perspective. Gated by RELAY_AUTH_TOKEN so this can't become an open
     // relay for anyone else's bot token.
-    const botMatch = url.pathname.match(/^\/bot([^/]+)\/([^/]+)$/);
+    // Trailing slash tolerated (e.g. "/sendMessage/") — our own client never
+    // sends one (see telegram_client.py's _build_url()), but a stray slash
+    // shouldn't be a hard 404.
+    const botMatch = url.pathname.match(/^\/bot([^/]+)\/([^/]+)\/?$/);
     if (botMatch) {
       if (!env.RELAY_AUTH_TOKEN) {
         return jsonResponse({ ok: false, description: 'relay auth not configured' }, 503);
       }
       const authHeader = request.headers.get('Authorization') || '';
       const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-      if (bearer !== env.RELAY_AUTH_TOKEN) {
+      if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
         return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
       }
 
@@ -112,19 +129,30 @@ export default {
       try {
         const init = { method: request.method };
         if (request.method !== 'GET' && request.method !== 'HEAD') {
-          // arrayBuffer, not text — sendDocument's body is multipart with
-          // raw file bytes; decoding/re-encoding it as text would corrupt
-          // anything non-UTF-8. Forwarding the original Content-Type header
-          // (multipart boundary included) alongside the raw bytes keeps
-          // both JSON and multipart calls intact.
+          // Stream the body straight through (request.body) instead of
+          // buffering it into memory first — sendDocument can carry a real
+          // file, and arrayBuffer()/text() would hold the whole thing in
+          // Worker memory for no benefit. duplex: 'half' is required by the
+          // fetch spec whenever the body is a ReadableStream.
           init.headers = { 'Content-Type': request.headers.get('Content-Type') || 'application/json' };
-          init.body = await request.arrayBuffer();
+          init.body = request.body;
+          init.duplex = 'half';
         }
         const upstream = await fetch(upstreamUrl, init);
-        const body = await upstream.text();
-        return new Response(body, {
+        const responseHeaders = {
+          'Content-Type': upstream.headers.get('Content-Type') || 'application/json',
+        };
+        // Propagate Telegram's own rate-limit signal (429 responses also
+        // carry retry_after in the JSON body, which telegram_client.py
+        // already reads — this header is a cheap extra for anything that
+        // only looks at headers).
+        const retryAfter = upstream.headers.get('Retry-After');
+        if (retryAfter) responseHeaders['Retry-After'] = retryAfter;
+        // Stream the response back too, rather than buffering it with
+        // .text() — same OOM/latency reasoning as the request side.
+        return new Response(upstream.body, {
           status: upstream.status,
-          headers: { 'Content-Type': upstream.headers.get('Content-Type') || 'application/json' },
+          headers: responseHeaders,
         });
       } catch (e) {
         // Same envelope shape Telegram itself uses for a failed call, so
