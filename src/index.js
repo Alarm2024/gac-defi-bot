@@ -1,4 +1,4 @@
-// 🪬🧿✝  GARDEN ANGEL — RELAY v18.2 (keyless, passive JSON relay + Telegram hop)
+// 🪬🧿✝  GARDEN ANGEL — RELAY v18.3 (keyless, passive JSON relay + Telegram hop)
 // ─────────────────────────────────────────────────────────────────────────────
 // This Worker is a PASSIVE DATA RELAY only:
 //   • /health           → JSON status
@@ -6,6 +6,9 @@
 //   • /status           → GET: last status snapshot pushed by the AWS bot (public,
 //                          read-only). POST: bot pushes its own snapshot (Bearer-gated
 //                          by RELAY_AUTH_TOKEN). See v18.2 note below.
+//   • /command          → dashboard→bot remote control (toggle ghost/mint, trigger a
+//                          hunt). Both GET and POST Bearer-gated by RELAY_AUTH_TOKEN —
+//                          unlike /status this can change bot behavior. See v18.3 note.
 //   • /bot<token>/<method> → dumb pass-through to api.telegram.org/bot<token>/<method>
 //                          (Bearer-gated by RELAY_AUTH_TOKEN — see below)
 //   • *                 → clean JSON 404 (kills the old "Bot Live" plain-text banner)
@@ -37,6 +40,13 @@
 // permanent "runs on a separate deployment" placeholder. Stored in the
 // existing BOT_KV namespace under a single fixed key — last-write-wins,
 // no history kept.
+//
+// v18.3 — adds /command, the reverse direction of /status: the Hugging
+// Face dashboard's buttons (Ghost Mode, Mint Mode, Start Hunt Scan) POST a
+// command here when clicked; the AWS bot polls (GET) every ~10s, runs the
+// exact same CommandHandlers method its own Telegram commands already use,
+// and the command is deleted on read so it can never double-fire. Gated by
+// RELAY_AUTH_TOKEN on both sides — this one is never public.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { PriceService } from './services/price.js';
@@ -73,7 +83,7 @@ export default {
 
     // ── /health ───────────────────────────────────────────────────────────────
     if (url.pathname === '/health') {
-      return jsonResponse({ status: 'ok', version: '18.2', ts: new Date().toISOString() });
+      return jsonResponse({ status: 'ok', version: '18.3', ts: new Date().toISOString() });
     }
 
     // ── /prices — read-only price JSON ─────────────────────────────────────────
@@ -169,6 +179,61 @@ export default {
       return jsonResponse({ ok: false, description: 'method not allowed' }, 405);
     }
 
+    // ── /command — DASHBOARD_ONLY remote control relay (v18.3) ──────────────────
+    // The Hugging Face Space's dashboard POSTs a control command here when one
+    // of its buttons is clicked (toggle ghost/mint mode, trigger a hunt scan)
+    // — it has no in-process bot to act on those clicks directly now that the
+    // bot runs standalone on AWS. The AWS bot polls (GET) every ~10s, executes
+    // at most one pending command, and it's deleted immediately so it can
+    // never run twice. Unlike /status, this can change bot behavior, so BOTH
+    // directions require RELAY_AUTH_TOKEN — it is never public.
+    if (url.pathname === '/command') {
+      if (!env.BOT_KV) {
+        return jsonResponse({ ok: false, description: 'KV storage not configured' }, 503);
+      }
+      if (!env.RELAY_AUTH_TOKEN) {
+        return jsonResponse({ ok: false, description: 'relay auth not configured' }, 503);
+      }
+      const authHeader = request.headers.get('Authorization') || '';
+      const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
+        return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+      }
+
+      if (request.method === 'POST') {
+        let body;
+        try {
+          body = await request.json();
+        } catch (e) {
+          return jsonResponse({ ok: false, description: 'invalid JSON body' }, 400);
+        }
+        if (typeof body !== 'object' || body === null || Array.isArray(body) || typeof body.action !== 'string') {
+          return jsonResponse({ ok: false, description: 'JSON body must be an object with a string "action"' }, 400);
+        }
+        const record = { action: body.action, queued_at: Math.floor(Date.now() / 1000) };
+        await env.BOT_KV.put('garden_angel_command', JSON.stringify(record));
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === 'GET') {
+        const raw = await env.BOT_KV.get('garden_angel_command');
+        if (!raw) {
+          return jsonResponse({ available: false });
+        }
+        // Consume immediately so a command never runs twice.
+        await env.BOT_KV.delete('garden_angel_command');
+        let record;
+        try {
+          record = JSON.parse(raw);
+        } catch (e) {
+          return jsonResponse({ available: false });
+        }
+        return jsonResponse({ available: true, ...record });
+      }
+
+      return jsonResponse({ ok: false, description: 'method not allowed' }, 405);
+    }
+
     // ── /bot<token>/<method> — Telegram Bot API relay (v18.1) ──────────────────
     // Dumb pass-through to https://api.telegram.org/bot<token>/<method>: same
     // HTTP method, same body, same query string, response returned unchanged.
@@ -242,7 +307,7 @@ export default {
     return jsonResponse({
       ok      : false,
       service : 'garden-angel-relay',
-      version : '18.2',
+      version : '18.3',
       error   : 'route not found',
       path    : url.pathname,
       ts      : new Date().toISOString(),
