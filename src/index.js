@@ -1,4 +1,4 @@
-// 🪬🧿✝  GARDEN ANGEL — RELAY v18.3 (keyless, passive JSON relay + Telegram hop)
+// 🪬🧿✝  GARDEN ANGEL — RELAY v18.4 (keyless, passive JSON relay + Telegram hop)
 // ─────────────────────────────────────────────────────────────────────────────
 // This Worker is a PASSIVE DATA RELAY only:
 //   • /health           → JSON status
@@ -7,8 +7,10 @@
 //                          read-only). POST: bot pushes its own snapshot (Bearer-gated
 //                          by RELAY_AUTH_TOKEN). See v18.2 note below.
 //   • /command          → dashboard→bot remote control (toggle ghost/mint, trigger a
-//                          hunt). Both GET and POST Bearer-gated by RELAY_AUTH_TOKEN —
-//                          unlike /status this can change bot behavior. See v18.3 note.
+//                          hunt, or a data query — see /command-result). Both GET and
+//                          POST Bearer-gated by RELAY_AUTH_TOKEN. See v18.3/v18.4 notes.
+//   • /command-result   → data-query results (wallet/gas/price/scanner/Solana panels).
+//                          Bearer-gated both ways. See v18.4 note.
 //   • /bot<token>/<method> → dumb pass-through to api.telegram.org/bot<token>/<method>
 //                          (Bearer-gated by RELAY_AUTH_TOKEN — see below)
 //   • *                 → clean JSON 404 (kills the old "Bot Live" plain-text banner)
@@ -47,6 +49,13 @@
 // exact same CommandHandlers method its own Telegram commands already use,
 // and the command is deleted on read so it can never double-fire. Gated by
 // RELAY_AUTH_TOKEN on both sides — this one is never public.
+//
+// v18.4 — /command gains optional params/request_id; new /command-result
+// route lets the AWS bot return actual DATA for panels that need it
+// (Wallet & Contract Status, Gas/RPC/Oracle Health, live Price Check,
+// Scanner Tokens, Solana Prices/Routes) instead of only firing an action.
+// See Garden-Angel-Terminal's modules/dashboard_panels.py for the shared
+// rendering code both the in-process dashboard and this relay path use.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { PriceService } from './services/price.js';
@@ -83,7 +92,7 @@ export default {
 
     // ── /health ───────────────────────────────────────────────────────────────
     if (url.pathname === '/health') {
-      return jsonResponse({ status: 'ok', version: '18.3', ts: new Date().toISOString() });
+      return jsonResponse({ status: 'ok', version: '18.4', ts: new Date().toISOString() });
     }
 
     // ── /prices — read-only price JSON ─────────────────────────────────────────
@@ -210,7 +219,14 @@ export default {
         if (typeof body !== 'object' || body === null || Array.isArray(body) || typeof body.action !== 'string') {
           return jsonResponse({ ok: false, description: 'JSON body must be an object with a string "action"' }, 400);
         }
-        const record = { action: body.action, queued_at: Math.floor(Date.now() / 1000) };
+        // v18.4 — optional params + request_id, for actions that need to
+        // return DATA (not just fire-and-forget). See /command-result below.
+        const record = {
+          action: body.action,
+          queued_at: Math.floor(Date.now() / 1000),
+          ...(body.params !== undefined ? { params: body.params } : {}),
+          ...(typeof body.request_id === 'string' ? { request_id: body.request_id } : {}),
+        };
         await env.BOT_KV.put('garden_angel_command', JSON.stringify(record));
         return jsonResponse({ ok: true });
       }
@@ -222,6 +238,70 @@ export default {
         }
         // Consume immediately so a command never runs twice.
         await env.BOT_KV.delete('garden_angel_command');
+        let record;
+        try {
+          record = JSON.parse(raw);
+        } catch (e) {
+          return jsonResponse({ available: false });
+        }
+        return jsonResponse({ available: true, ...record });
+      }
+
+      return jsonResponse({ ok: false, description: 'method not allowed' }, 405);
+    }
+
+    // ── /command-result — data-returning command results (v18.4) ────────────────
+    // Companion to /command's request_id/params extension above: some dashboard
+    // panels (Wallet & Contract Status, Gas/RPC/Oracle Health, live Price Check,
+    // Scanner Tokens, Solana Prices/Routes) need actual DATA back, not just a
+    // fire-and-forget action. Flow: dashboard POSTs /command with a request_id;
+    // the AWS bot picks it up via GET /command, computes the real answer (same
+    // rendering code the in-process dashboard would use — see
+    // modules/dashboard_panels.py), and POSTs the rendered result here keyed by
+    // that request_id; the dashboard polls GET /command-result?request_id=...
+    // until it shows up (or times out). Stored with a short TTL — this is
+    // transient request/response data, not a durable record. Same auth model
+    // as /command: never public, since results could reveal wallet balances.
+    if (url.pathname === '/command-result') {
+      if (!env.BOT_KV) {
+        return jsonResponse({ ok: false, description: 'KV storage not configured' }, 503);
+      }
+      if (!env.RELAY_AUTH_TOKEN) {
+        return jsonResponse({ ok: false, description: 'relay auth not configured' }, 503);
+      }
+      const authHeader = request.headers.get('Authorization') || '';
+      const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
+        return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+      }
+
+      if (request.method === 'POST') {
+        let body;
+        try {
+          body = await request.json();
+        } catch (e) {
+          return jsonResponse({ ok: false, description: 'invalid JSON body' }, 400);
+        }
+        if (typeof body !== 'object' || body === null || Array.isArray(body)
+            || typeof body.request_id !== 'string' || !body.request_id) {
+          return jsonResponse({ ok: false, description: 'JSON body must include a string "request_id"' }, 400);
+        }
+        const record = { result: body.result, completed_at: Math.floor(Date.now() / 1000) };
+        // 120s TTL — plenty for a dashboard poll loop, short enough that stale
+        // results never accumulate in KV.
+        await env.BOT_KV.put(`garden_angel_result:${body.request_id}`, JSON.stringify(record), { expirationTtl: 120 });
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === 'GET') {
+        const requestId = url.searchParams.get('request_id') || '';
+        if (!requestId) {
+          return jsonResponse({ ok: false, description: 'missing request_id param' }, 400);
+        }
+        const raw = await env.BOT_KV.get(`garden_angel_result:${requestId}`);
+        if (!raw) {
+          return jsonResponse({ available: false });
+        }
         let record;
         try {
           record = JSON.parse(raw);
@@ -307,7 +387,7 @@ export default {
     return jsonResponse({
       ok      : false,
       service : 'garden-angel-relay',
-      version : '18.3',
+      version : '18.4',
       error   : 'route not found',
       path    : url.pathname,
       ts      : new Date().toISOString(),
