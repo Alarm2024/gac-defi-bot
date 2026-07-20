@@ -126,6 +126,9 @@ export default {
     // never wallet keys or trade details, matching /prices' own
     // read-is-public posture.
     if (url.pathname === '/status') {
+      if (!env.BOT_KV) {
+        return jsonResponse({ ok: false, description: 'KV storage not configured' }, 503);
+      }
       if (request.method === 'POST') {
         if (!env.RELAY_AUTH_TOKEN) {
           return jsonResponse({ ok: false, description: 'relay auth not configured' }, 503);
@@ -140,6 +143,9 @@ export default {
           body = await request.json();
         } catch (e) {
           return jsonResponse({ ok: false, description: 'invalid JSON body' }, 400);
+        }
+        if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+          return jsonResponse({ ok: false, description: 'JSON body must be a plain object' }, 400);
         }
         const record = { ...body, received_at: Math.floor(Date.now() / 1000) };
         await env.BOT_KV.put('garden_angel_status', JSON.stringify(record));
