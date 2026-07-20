@@ -1,8 +1,11 @@
-// 🪬🧿✝  GARDEN ANGEL — RELAY v18.1 (keyless, passive JSON relay + Telegram hop)
+// 🪬🧿✝  GARDEN ANGEL — RELAY v18.2 (keyless, passive JSON relay + Telegram hop)
 // ─────────────────────────────────────────────────────────────────────────────
 // This Worker is a PASSIVE DATA RELAY only:
 //   • /health           → JSON status
 //   • /prices           → read-only price JSON (X-API-Key gated if ORACLE_API_KEY is set)
+//   • /status           → GET: last status snapshot pushed by the AWS bot (public,
+//                          read-only). POST: bot pushes its own snapshot (Bearer-gated
+//                          by RELAY_AUTH_TOKEN). See v18.2 note below.
 //   • /bot<token>/<method> → dumb pass-through to api.telegram.org/bot<token>/<method>
 //                          (Bearer-gated by RELAY_AUTH_TOKEN — see below)
 //   • *                 → clean JSON 404 (kills the old "Bot Live" plain-text banner)
@@ -26,6 +29,14 @@
 // relay for arbitrary third-party bot tokens — set it once with
 // `wrangler secret put RELAY_AUTH_TOKEN` to the SAME value already
 // configured for the Python bot.
+//
+// v18.2 — adds /status: the AWS-deployed bot (post-migration, see
+// Garden-Angel-Terminal's bot.py _status_heartbeat_loop) POSTs a compact
+// status snapshot here every ~30s; the Hugging Face Space's DASHBOARD_ONLY
+// dashboard GETs it back so it can show real numbers again instead of a
+// permanent "runs on a separate deployment" placeholder. Stored in the
+// existing BOT_KV namespace under a single fixed key — last-write-wins,
+// no history kept.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { PriceService } from './services/price.js';
@@ -62,7 +73,7 @@ export default {
 
     // ── /health ───────────────────────────────────────────────────────────────
     if (url.pathname === '/health') {
-      return jsonResponse({ status: 'ok', version: '18.1', ts: new Date().toISOString() });
+      return jsonResponse({ status: 'ok', version: '18.2', ts: new Date().toISOString() });
     }
 
     // ── /prices — read-only price JSON ─────────────────────────────────────────
@@ -103,6 +114,53 @@ export default {
         console.error('/prices error:', e.message);
         return jsonResponse({ error: e.message }, 500);
       }
+    }
+
+    // ── /status — DASHBOARD_ONLY status relay (v18.2) ──────────────────────────
+    // The AWS-deployed bot POSTs its own live status here every ~30s (gated by
+    // RELAY_AUTH_TOKEN, same secret as the /bot Telegram relay below); the
+    // Hugging Face Space's dashboard (running DASHBOARD_ONLY, no in-process
+    // bot of its own) GETs it back to show real numbers instead of a
+    // permanent placeholder. Read side is intentionally public/keyless — this
+    // is non-sensitive operational data (uptime, scan counts, mode flags),
+    // never wallet keys or trade details, matching /prices' own
+    // read-is-public posture.
+    if (url.pathname === '/status') {
+      if (request.method === 'POST') {
+        if (!env.RELAY_AUTH_TOKEN) {
+          return jsonResponse({ ok: false, description: 'relay auth not configured' }, 503);
+        }
+        const authHeader = request.headers.get('Authorization') || '';
+        const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+        if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
+          return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+        }
+        let body;
+        try {
+          body = await request.json();
+        } catch (e) {
+          return jsonResponse({ ok: false, description: 'invalid JSON body' }, 400);
+        }
+        const record = { ...body, received_at: Math.floor(Date.now() / 1000) };
+        await env.BOT_KV.put('garden_angel_status', JSON.stringify(record));
+        return jsonResponse({ ok: true });
+      }
+
+      if (request.method === 'GET') {
+        const raw = await env.BOT_KV.get('garden_angel_status');
+        if (!raw) {
+          return jsonResponse({ available: false });
+        }
+        let record;
+        try {
+          record = JSON.parse(raw);
+        } catch (e) {
+          return jsonResponse({ available: false });
+        }
+        return jsonResponse({ available: true, ...record });
+      }
+
+      return jsonResponse({ ok: false, description: 'method not allowed' }, 405);
     }
 
     // ── /bot<token>/<method> — Telegram Bot API relay (v18.1) ──────────────────
@@ -178,7 +236,7 @@ export default {
     return jsonResponse({
       ok      : false,
       service : 'garden-angel-relay',
-      version : '18.1',
+      version : '18.2',
       error   : 'route not found',
       path    : url.pathname,
       ts      : new Date().toISOString(),
