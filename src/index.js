@@ -167,7 +167,27 @@ export default {
           return jsonResponse({ ok: false, description: 'JSON body must be a plain object' }, 400);
         }
         const record = { ...body, received_at: Math.floor(Date.now() / 1000) };
-        await env.BOT_KV.put('garden_angel_status', JSON.stringify(record));
+        // FIX (operator report — POST /status returning a bare 500 with no
+        // diagnostic detail every ~30s, right on the AWS bot's own
+        // _status_heartbeat_loop cadence) — this put() had no try/catch,
+        // unlike every other fallible call in this file (request.json()
+        // above, /prices' own fetch below). Any KV-layer failure (most
+        // likely candidate: Cloudflare KV's documented 1-write/sec-per-key
+        // limit — this key is written by every single heartbeat, so any
+        // overlap with a stray/duplicate writer trips it) crashed the
+        // whole handler as an opaque, bodyless 500 with zero information
+        // logged either side. Catching it here can't make a write actually
+        // succeed, but it turns a silent crash into a real, visible reason
+        // — both in this Worker's own console.error (visible via `wrangler
+        // tail`) and in the JSON body the Python bot's own [StatusHeartbeat]
+        // warning log already prints, so the NEXT occurrence is diagnosable
+        // instead of another blank 500.
+        try {
+          await env.BOT_KV.put('garden_angel_status', JSON.stringify(record));
+        } catch (e) {
+          console.error('/status KV put error:', e.message);
+          return jsonResponse({ ok: false, description: `KV write failed: ${e.message}` }, 500);
+        }
         return jsonResponse({ ok: true });
       }
 
