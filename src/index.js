@@ -77,12 +77,43 @@ function jsonResponse(obj, status = 200, extraHeaders = {}) {
 // Leaking whether the length matches isn't a practical risk for a
 // high-entropy secret token.
 function _timingSafeEqual(a, b) {
+  // FIX (operator report — AWS kept getting 401 on /status and /command
+  // after re-pasting a freshly-generated RELAY_AUTH_TOKEN into this
+  // Worker's dashboard secret, the AWS .env, and the HF Variable, all
+  // three re-verified equal by eye) — a value typed/pasted into the
+  // Cloudflare dashboard's secret field can carry a trailing newline or
+  // stray whitespace that's invisible when re-displayed but not
+  // byte-identical; the Python side already .strip()s its own env var
+  // before sending, so any such stray whitespace landing on the Worker's
+  // stored copy alone was enough to fail this exact-length check forever,
+  // with no way to tell from a plain "unauthorized" response. Trimming
+  // both sides here closes that specific gap; it does not weaken the
+  // check for two values that already match untrimmed.
+  a = (a || '').trim();
+  b = (b || '').trim();
   if (a.length !== b.length) return false;
   let mismatch = 0;
   for (let i = 0; i < a.length; i++) {
     mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return mismatch === 0;
+}
+
+// Safe auth-failure diagnostic — lengths only, never the actual secret or
+// bearer value (see _timingSafeEqual's own comment: leaking a length match
+// isn't a practical risk for a high-entropy token). Lets the operator tell
+// "totally wrong value" (lengths differ) apart from "looks right but isn't"
+// (same length, still mismatched — almost certainly a hidden-character
+// copy/paste issue) without another round of screenshot-and-guess.
+function _authFailureDetail(bearer, secret) {
+  const b = (bearer || '').trim();
+  const s = (secret || '').trim();
+  if (!s) return 'RELAY_AUTH_TOKEN not configured on this Worker';
+  if (!b) return 'no bearer token received';
+  if (b.length !== s.length) {
+    return `bearer length ${b.length} != configured token length ${s.length}`;
+  }
+  return 'same length as configured token but content differs — check for a hidden/stray character from copy-paste';
 }
 
 export default {
@@ -155,7 +186,10 @@ export default {
         const authHeader = request.headers.get('Authorization') || '';
         const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
         if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
-          return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+          return jsonResponse({
+            ok: false, description: 'unauthorized',
+            detail: _authFailureDetail(bearer, env.RELAY_AUTH_TOKEN),
+          }, 401);
         }
         let body;
         try {
@@ -226,7 +260,10 @@ export default {
       const authHeader = request.headers.get('Authorization') || '';
       const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
       if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
-        return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+        return jsonResponse({
+          ok: false, description: 'unauthorized',
+          detail: _authFailureDetail(bearer, env.RELAY_AUTH_TOKEN),
+        }, 401);
       }
 
       if (request.method === 'POST') {
@@ -292,7 +329,10 @@ export default {
       const authHeader = request.headers.get('Authorization') || '';
       const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
       if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
-        return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+        return jsonResponse({
+          ok: false, description: 'unauthorized',
+          detail: _authFailureDetail(bearer, env.RELAY_AUTH_TOKEN),
+        }, 401);
       }
 
       if (request.method === 'POST') {
@@ -353,7 +393,10 @@ export default {
       const authHeader = request.headers.get('Authorization') || '';
       const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
       if (!_timingSafeEqual(bearer, env.RELAY_AUTH_TOKEN)) {
-        return jsonResponse({ ok: false, description: 'unauthorized' }, 401);
+        return jsonResponse({
+          ok: false, description: 'unauthorized',
+          detail: _authFailureDetail(bearer, env.RELAY_AUTH_TOKEN),
+        }, 401);
       }
 
       const [, botToken, method] = botMatch;
