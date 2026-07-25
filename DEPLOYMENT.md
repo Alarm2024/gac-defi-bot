@@ -1,3 +1,11 @@
+> **DECOMMISSIONED — 2026-07-24**
+> This Cloudflare Worker relay has been retired. The trading bot
+> (Garden-Angel-Terminal) now runs standalone on AWS, talking directly to
+> RPC/Jupiter/Telegram, and no longer depends on this Worker for price relay,
+> trade confirmation, dashboard remote control, or Telegram proxying. This
+> repo is kept for historical/audit reference only — do not redeploy without
+> first confirming with the operator.
+
 # Garden Angel — Go-Live Runbook (read fully before risking funds)
 
 This is an honest checklist, not a "it's safe now" certificate. The code changes
